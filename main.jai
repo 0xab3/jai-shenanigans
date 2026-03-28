@@ -1,8 +1,10 @@
 #import "Basic";
 #import "Rtp";
+#import "ICE";
 #import "File";
 #import "Compiler";
 #import "LibAV";
+#import "OpenSSL";
 
 open_stream :: () {
   fmt_ctx := avformat_alloc_context();
@@ -63,10 +65,10 @@ open_stream :: () {
   }
 }
 main :: () {
-  open_stream();
-}
-
-#run {
-  set_build_options_dc(.{ do_output = false });
-  main();
+  candidates: Ice_Candidates = .{
+    config = Ice_Configuration.{
+      stun_servers = .[.{ "stun.l.google.com", 19302 }],
+    },
+  };
+  get_reflexive_candidates(*candidates);
 }

@@ -29,7 +29,7 @@ SSL_write :: (ssl: *SSL, buf: *void, num: s32) -> s32 #foreign libssl;
 SSL_read :: (ssl: *SSL, buf: *void, num: s32) -> s32 #foreign libssl;
 SSL_get_error :: (ssl: *SSL, ret: s32) -> s32 #foreign libssl;
 ERR_error_string :: (ret: s32, buf: *u8) -> *u8 #foreign libssl;
-RAND_bytes :: (buf: *u8, num: s32) -> s32 #foreign libssl;
+RAND_bytes :: (buf: *u8, num: s32) -> s32 #foreign libcrypto;
 
 SSL_error_string :: inline (ret: s32) -> string {
   return to_string(ERR_error_string());
