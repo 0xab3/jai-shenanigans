@@ -18,15 +18,26 @@ IpAddress :: struct { // TODO(shahzad): @feat add ipv6
   ip_addr: IpV4;
 };
 
+SocketAddress :: struct {
+  addr: IpAddress;
+  port: u16;
+};
+
 to_string :: (addr: IpAddress) -> string {
-  as_inet := sockaddr_in.{
-    sin_family = AF_INET,
-    sin_port = 0,
-  };
-  as_inet.sin_addr.s_addr = xx addr.ip_addr;
-  return to_string(as_inet);
+  // yanked from Socket/module.jai
+  builder: String_Builder;
+  append_address(*builder, addr.ip_addr);
+  return builder_to_string(*builder);
+}
+
+// @scope ipv4 only @unsafe we do not check the length of the array
+ip_addr_from_string :: (addr: string) -> IpAddress {
+  parsed_addr: in_addr;
+  inet_aton(addr.data, *parsed_addr);
+  return .{parsed_addr.s_addr};
 }
 
 
 #scope_file
 #import "Socket";
+#import "Basic";
