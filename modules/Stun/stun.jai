@@ -25,16 +25,24 @@ Stun_Server_Info :: struct {
    // indication, a class of 0b10 is a success response, and a class of
    // 0b11 is an error response.
 
-Stun_Header_Type :: enum u16 {
-  _C0 :: 1 << 4;
-  _C1 :: 1 << 8;
+Stun_Header_Type_Sane :: enum u16 {
+  REQUEST                  ::  0x0;
+  INDICATION               ::  0x01;
+  SUCESS_RESPONSE          ::  0x10;
+  ERROR_RESPONSE           ::  0x11;
+};
 
+STUN_HEADER_TYPE_BIT_C0 :: 1 << 4;
+STUN_HEADER_TYPE_BIT_C1 :: 1 << 8;
+
+Stun_Header_Type :: enum_flags u16 {
   REQUEST                       ::  0x0;
-  INDICATION                    ::  _C0;
-  SUCESS_RESPONSE               ::  _C1;
-  ERROR_RESPONSE                ::  _C0 | _C1;
+  INDICATION                    ::  STUN_HEADER_TYPE_BIT_C0;
+  SUCESS_RESPONSE               ::  STUN_HEADER_TYPE_BIT_C1;
+  ERROR_RESPONSE                ::  STUN_HEADER_TYPE_BIT_C0 | STUN_HEADER_TYPE_BIT_C1;
 
   BIND                          ::  0x1;
+
 };
 
 Stun_Header :: struct {
@@ -44,7 +52,7 @@ Stun_Header :: struct {
   } #no_padding;
 
   type: u16;
-  length:  u16; // exclude header (@important length & 0x11 should be zero for stun)
+  length:  u16;
   magic_cookie: u32;
   transaction_id: Pair(u64, u32);
 } #no_padding;
@@ -79,14 +87,22 @@ Stun_Address_Family :: enum u16 {
 };
 
 // make this a tagged union
-Stun_Xor_Mapped_Attribute :: struct {
+Stun_Mapped_Attribute :: struct {
   family: Stun_Address_Family; // first 8 bits are 0
-  x_port: u16;
-  x_addr: IpAddress;
+  using #as addr_info: SocketAddress;
 };
 
-Stun_Payload :: struct {
-  attr: *Stun_Attribute_Header;
+Stun_None_Attribute :: void;
+Stun_Attribute_Value :: Tagged_Union(Stun_None_Attribute, Stun_Mapped_Attribute);
+// this is only for convenience
+Stun_Attribute :: struct {
+  header: Stun_Attribute_Header;
+  value: Stun_Attribute_Value;
+};
+
+Stun_Message :: struct {
+  header: Stun_Header;
+  attributes: [..]Stun_Attribute;
 };
 
 stun_server_info_from_network_endpoint :: (endpoint: NetworkEndpoint) -> Stun_Server_Info {
@@ -116,24 +132,186 @@ new_udp_connection :: (ip: IpAddress, port: u16) -> s32 {
 
 udp_send :: (socket: s32, data: *u8, len: u32){
   bytes_written := send(socket, data, xx len, 0);
-  print("wrote % bytes to udp\n",bytes_written);
+  print("wrote % bytes to udp!\n",bytes_written);
   assert(bytes_written == len,
       tprint("socket failed written %, wanted %, %", bytes_written, len, errno()));
 }
 
 udp_send :: (socket: s32, data: []u8){
   bytes_written := send(socket, data.data, xx data.count, 0);
+  print("wrote % bytes to udp!\n",bytes_written);
   assert(bytes_written == data.count,
       tprint("socket failed written %, wanted %, %", bytes_written, data.count, errno()));
 }
 udp_recv :: (socket: s32, buf: *[]u8) -> s64 {
   sz := recv(socket, buf.data, xx buf.count, xx 0);
-  print("recvd %\n",sz);
+  print("read % byes from udp!\n",sz);
   assert(sz > 0);
   return sz;
 }
 
-send_binding_request :: (server: *Stun_Server_Info) {
+stun_header_get_type :: (header: *Stun_Header) -> Stun_Header_Type_Sane {
+  type :u32 = header.type;
+  mask :u32 = xx (STUN_HEADER_TYPE_BIT_C0 | STUN_HEADER_TYPE_BIT_C1);
+  as_sane : u32 = 0;
+  #asm {
+     pext as_sane, type, mask;
+  }
+  _sane := as_sane;
+  return xx _sane;
+}
+
+
+// made clacker write the printing code because i ain't spending doing allat
+print_stun_header :: (builder: *String_Builder, header: Stun_Header) -> string #expand {
+    print_to_builder(builder, "{\n");
+    print_to_builder(builder, "    type: %,\n", cast(Stun_Header_Type)header.type);
+    print_to_builder(builder, "    length: %,\n", header.length);
+    print_to_builder(builder, "    magic_cookie: 0x%,\n", formatInt(header.magic_cookie, base=16));
+    print_to_builder(builder, "    transaction_id: %_%,\n",
+      formatInt(header.transaction_id.first, base=16),
+      formatInt(header.transaction_id.second, base=16)
+    );
+    print_to_builder(builder, "  }");
+
+    return builder_to_string(builder);
+}
+
+print_stun_message :: (builder: *String_Builder, message: Stun_Message) -> string #expand {
+    temp_builder: String_Builder;
+    print_to_builder(builder, "STUN message {\n");
+    print_to_builder(builder, "  header: %\n", print_stun_header(*temp_builder, message.header));
+
+    print_to_builder(builder, "  attributes: [\n");
+
+    for attr: message.attributes {
+        print_to_builder(builder, "    {\n");
+        print_to_builder(builder, "      type: %,\n", attr.header.type);
+        print_to_builder(builder, "      length: %,\n", attr.header.length);
+
+        if attr.header.type == {
+          case .MAPPED_ADDRESS;  #through;
+          case .XOR_MAPPED_ADDRESS; {
+            mapped := isa(attr.value, Stun_Mapped_Attribute);
+            assert(mapped != null);
+
+            print_to_builder(builder, "      value: {\n");
+            print_to_builder(builder, "        family: %,\n", mapped.family);
+            print_to_builder(builder, "        port: %,\n", mapped.port);
+            print_to_builder(builder, "        addr: %,\n", to_string(mapped.addr));
+            print_to_builder(builder, "      }\n");
+        }
+
+        case .USERNAME; #through;
+        case .MESSAGE_INTEGRITY; #through;
+        case .ERROR_CODE; #through;
+        case .UNKNOWN_ATTRIBUTES; #through;
+        case .REALM; #through;
+        case .NONCE; {
+            print_to_builder(builder, "      value: <unparsed> %\n", attr.header.type);
+        }
+
+        case; {
+            print_to_builder(builder, "      value: <unknown>\n");
+        }
+        }
+
+        print_to_builder(builder, "    },\n");
+    }
+
+    print_to_builder(builder, "  ]\n");
+    print_to_builder(builder, "}\n");
+
+    return builder_to_string(builder);
+}
+stun_message_parse :: (res: []u8) -> Stun_Message {
+  assert(res.count >= 20, tprint("stun message should atleast be 20 bytes, given % bytes!", res.count));
+  parsed_message: Stun_Message;
+  res_header := cast(*Stun_Header)res.data;
+
+  type := stun_header_get_type(res_header);
+
+  if type == {
+    case .REQUEST; assert(false, "REQUEST is not implemented!");
+    case .INDICATION; assert(false, "INDICATION is not implemented!");
+    case .SUCESS_RESPONSE; {
+      assert(res_header.type & xx Stun_Header_Type.BIND != 0);
+    };
+    case .ERROR_RESPONSE; assert(false, "ERROR_RESPONSE is not implemented!");
+  }
+  // TODO(shahzad): we do not parse method and assume that the server will only send the bind one
+
+  parsed_message.header = .{
+    type = xx BYTE_SWAP(res_header.type),
+    length = BYTE_SWAP(res_header.length),
+    magic_cookie = BYTE_SWAP(res_header.magic_cookie),
+    transaction_id.first = res_header.transaction_id.first,
+    transaction_id.second = res_header.transaction_id.second, // idk why but we don't have to do swap
+  };
+
+  assert(parsed_message.header.length & 0x11 == 0); // the value is padded to be multiple of 4 bytes
+
+  // skip the payload first
+  attribute_view := array_view(res, size_of(Stun_Header), res.count);
+
+  bytes_consumed_while_parsing_attrs := 0;
+  while attribute_view.count > 0 {
+    attr : Stun_Attribute;
+    attr_header: Stun_Attribute_Header;
+    attr_value: Stun_Attribute_Value;
+
+    attr_header = .{
+      type = xx BYTE_SWAP(attribute_view.data.(*u16).*),
+      length = BYTE_SWAP((attribute_view.data + 2).(*u16).*),
+    };
+    bytes_consumed_while_parsing_attrs += 4;
+
+    assert(attr_header.type == .XOR_MAPPED_ADDRESS);
+    assert(attr_header.length == 8);
+
+    attr.header = attr_header;
+
+    if attr_header.type == {
+      case .XOR_MAPPED_ADDRESS; {
+        attribute_value_view := array_view(attribute_view, size_of(Stun_Attribute_Header), res.count);
+        value := Stun_Mapped_Attribute.{
+          family =  xx (attribute_value_view.data + 1).(*u8).*,
+          port = xx BYTE_SWAP(BYTE_SWAP((attribute_value_view.data + 2).(*u16).*) ^ cast(u16) (MAGIC_COOKIE >> 16)),
+          addr = .{ ip_addr = BYTE_SWAP(BYTE_SWAP((attribute_value_view.data + 4).(*u32).*) ^ MAGIC_COOKIE)},
+        };
+
+        assert(value.family == .IPV4, "we do not support IPV6 at all!"); // right now atleast
+
+        set(*attr_value, value);
+        bytes_consumed_while_parsing_attrs += 8;
+      }
+    case;
+      assert(false, tprint("attr_type % is unimplimented!", attr_header.type));
+    }
+    attr.value = attr_value;
+    array_add(*parsed_message.attributes, attr);
+
+    attribute_view = array_view(attribute_view, size_of(Stun_Attribute_Header) + attr_header.length, attribute_view.count);
+  }
+  return parsed_message;
+}
+
+stun_message_try_get_mapped_address :: (msg: Stun_Message) -> (bool, Stun_Mapped_Attribute) {
+  undef : Stun_Mapped_Attribute;
+  for msg.attributes {
+    if it.header.type == {
+      case .MAPPED_ADDRESS; #through;
+      case .XOR_MAPPED_ADDRESS;
+        value := isa(it.value, Stun_Mapped_Attribute);
+        assert(value != null);
+        return true, value.*;
+      case; continue;
+    }
+  }
+  return false, undef;
+
+}
+send_binding_request :: (server: *Stun_Server_Info) -> Stun_Message {
   addr := server.addrs[0];
   sock_fd := new_udp_connection(addr, server.port);
   hi, lo := _new_transaction_id();
@@ -153,33 +331,17 @@ send_binding_request :: (server: *Stun_Server_Info) {
 
   size := udp_recv(sock_fd, *slice);
   slice.count = size;
+  
+  msg := stun_message_parse(slice);
 
-  read_header := cast(*Stun_Header)slice.data;
+  sb: String_Builder;
+  print("response\n");
+  print("--------------------------------------------------\n");
+  print("%", print_stun_message(*sb, msg));
+  print("--------------------------------------------------\n");
 
-  assert(read_header.type & xx Stun_Header_Type.SUCESS_RESPONSE != 0 && read_header.type & 1 != 0);
 
-  payload := array_view(slice, size_of(Stun_Header), slice.count);
-
-  attr := Stun_Attribute_Header.{
-    type = xx BYTE_SWAP(payload.data.(*u16).*),
-    length = BYTE_SWAP((payload.data + 2).(*u16).*),
-  };
-
-  print("type %\n", attr.type);
-  print("length %\n", attr.length);
-  assert(attr.type == .XOR_MAPPED_ADDRESS);
-  assert(attr.length == 8);
-
-  // TODO(shahzad): this is very bad
-  payload = array_view(payload, size_of(Stun_Attribute_Header), slice.count);
-  xor_mapped := Stun_Xor_Mapped_Attribute.{
-    family =  xx (payload.data + 1).(*u8).*,
-    x_port = xx BYTE_SWAP(BYTE_SWAP((payload.data + 2).(*u16).*) ^ cast(u16) (MAGIC_COOKIE >> 16)),
-    x_addr = .{ ip_addr = BYTE_SWAP(BYTE_SWAP((payload.data + 4).(*u32).*) ^ MAGIC_COOKIE)},
-  };
-  print("family %\n", xor_mapped.family);
-  print("x_port %\n", xor_mapped.x_port);
-  print("x_addr %\n", to_string(xor_mapped.x_addr));
+  return msg;
 }
 
 _new_transaction_id :: () -> (u32, u64) #expand {
@@ -244,3 +406,4 @@ big_endian :: () -> bool #expand {
 #import "Linux";
 #import "POSIX";
 #import "OpenSSL";
+#import "Tagged_Union";
