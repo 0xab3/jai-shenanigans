@@ -43,6 +43,9 @@ Ice_Candidate :: struct {
   // @remove this is a part of json not "Ice_Candidate"
   sdp_mid: string;
   sdp_mline_index: u32;
+  
+  // @remove ts has to go
+  socket: Socket = xx -1;
 };
 
 
@@ -71,8 +74,8 @@ parse_ice_candidate_string :: (ice_string: string) -> Ice_Candidate {
   // skip the colon
   ice_string_view = xx array_view(cast([]u8)ice_string_view, 1);
 
-  raddr: string;
-  rport: u16;
+  raddr: string = "0.0.0.0";
+  rport: u16 = 0;
 
   foundation:,       ok  =  parse_token(*ice_string_view);  assert(ok);
   componenet_id:,    ok  =  parse_int(*ice_string_view);    assert(ok);
@@ -196,13 +199,13 @@ to_string :: (builder: *String_Builder, using candidate: *Ice_Candidate) -> stri
 // "candidate:1165362036 1 udp 1677729535 117.223.196.177 45852 typ srflx raddr 0.0.0.0 rport 0 generation 0 ufrag E89D network-cost 999"
   rel_addr_and_port := "";
   if candidate_type != .HOST {
-    rel_addr_and_port = tprint("raddr % rport %", to_string(rel_addr), rel_port);
+    rel_addr_and_port = tprint("raddr % rport % ", to_string(rel_addr), rel_port);
   }
 
   // @need_context does generation 0 make any difference??
   ok := print_to_builder(builder,
   // all of the shit after typ and rel addr is extension
-    "candidate:% % % % % % typ % % ufrag % network-cost %", foundation,
+    "candidate:% % % % % % typ % %ufrag % network-cost %", foundation,
       componenet_id, to_string(transport), priority, connection_addr, port,
       to_string(candidate_type), rel_addr_and_port, ufrag, network_cost,
   );
@@ -212,19 +215,19 @@ to_string :: (builder: *String_Builder, using candidate: *Ice_Candidate) -> stri
 
 
 // the whole json thing
-// @remove this should be at the edge of our program not in the middle
+// @remove this should be at the edge of our program not in the middle or should it?
 to_chrome_ice_candidate_shit :: (builder: *String_Builder, using candidate :*Ice_Candidate) -> string {
   // {"candidate":"candidate:1165362036 1 udp 1677729535 117.223.196.177 45852 typ srflx raddr 0.0.0.0 rport 0 generation 0 ufrag E89D network-cost 999","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":"E89D"}
 
   rel_addr_and_port := "";
   if candidate_type != .HOST {
-    rel_addr_and_port = tprint("raddr % rport %", to_string(rel_addr), rel_port);
+    rel_addr_and_port = tprint("raddr % rport % ", to_string(rel_addr), rel_port);
   }
 
   // @need_context does generation 0 make any difference??
   ok := print_to_builder(builder,
   // all of the shit after typ and rel addr is extension
-    "{\"candidate\": \"candidate:% % % % % % typ % % ufrag % network-cost %\",\"sdpMid\":\"%\"\"sdpMLineIndex\":%,\"usernameFragment\":\"%\"}",
+    "{\"candidate\": \"candidate:% % % % % % typ % %ufrag % network-cost %\",\"sdpMid\":\"%\",\"sdpMLineIndex\":%,\"usernameFragment\":\"%\"}",
       foundation, componenet_id, to_string(transport), priority, connection_addr, port,
       to_string(candidate_type), rel_addr_and_port, ufrag, network_cost, sdp_mid, sdp_mline_index, ufrag
   );
@@ -235,36 +238,49 @@ to_chrome_ice_candidate_shit :: (builder: *String_Builder, using candidate :*Ice
 
 // @refactor Ice_Session?? i don't think thats a right name
 Ice_Session :: struct {
-  inner: [..]string;
-  builder: String_Builder;
+  candidates: [..]Ice_Candidate;
   config : Ice_Configuration;
 };
 
-get_local_candidates :: (using candidates: *Ice_Session) {
-  addrs: *ifaddrs;
-  getifaddrs(*addrs);
-  iter := addrs;
+get_host_candidates :: (using session: *Ice_Session) -> []Ice_Candidate {
+  iter: *ifaddrs;
+  getifaddrs(*iter);
 
+  mark := candidates.count;
+  component_id := 0; // @scope make this not be hardcoded
+  RANDOM_PORT :: 4264; // random port that i chose for no reason
+
+  sock_fd := xx socket(AF_INET, .DGRAM, xx 0);
+  assert(sock_fd > 2);
   while iter != null {
+    defer iter = iter.ifa_next;
     // we only support IPV4
     if iter.ifa_addr && iter.ifa_addr.sa_family == AF_INET {
-      pAddr: *sockaddr_in = cast(*sockaddr_in)iter.ifa_addr;
+      p_addr: *sockaddr_in = cast(*sockaddr_in)iter.ifa_addr;
+      ip_addr := p_addr.sin_addr.s_addr;
 
-      if pAddr.sin_addr.s_addr == INADDR_LOOPBACK continue;
+      // @need_context idk why we have to do byte swap for this
+      if BYTE_SWAP(ip_addr) == INADDR_LOOPBACK continue;
 
-      ok := print_to_builder(*builder, "Interface: %\tAddress: %",
-              to_string(iter.ifa_name), to_string(inet_ntoa(pAddr.sin_addr)));
-      assert(ok);
-      duped_string := builder_to_string(*builder);
-      print("%\n", duped_string);
+      ret := bind(cast(Socket)sock_fd, BYTE_SWAP(ip_addr), RANDOM_PORT);
+      assert(ret == 0);
+      as_sock_addr := SocketAddress.{
+        addr = IpAddress.{ ip_addr },
+        port = RANDOM_PORT,
+      };
+      ice_candidate := new_ice_candidate(as_sock_addr, .HOST, xx component_id);
+      ice_candidate.socket = sock_fd;
 
-      array_add(*inner, duped_string);
+      array_add(*candidates, ice_candidate);
     }
-    iter = iter.ifa_next;
   }
-  freeifaddrs(addrs);
+  freeifaddrs(iter);
+
+  return array_view(candidates, mark, candidates.count);
 }
 
+
+// @incomplete
 get_reflexive_candidates :: (using candidates: *Ice_Session) {
   server := config.stun_servers[0];
   info := stun_server_info_from_network_endpoint(server);
@@ -272,10 +288,6 @@ get_reflexive_candidates :: (using candidates: *Ice_Session) {
 
   ok: bool; ip_info_attr: SocketAddress;
   ok, ip_info_attr = stun_message_try_get_mapped_address(response);
-  ice_candidate := new_ice_candidate(ip_info_attr, .SRFLX, 0);
-  _builder: String_Builder;
-  as_string := to_chrome_ice_candidate_shit(*_builder, *ice_candidate);
-  print("%\n",as_string);
 }
 get_relay_candidates :: () {
   assert(false, "unimplemented! we don't support turn for now");
@@ -284,7 +296,7 @@ get_relay_candidates :: () {
 
 get_random_string :: (len: u64) -> string #expand {
   new_len := (len + 3) / 4 * 3;
-  as_string := Newstring.{talloc(new_len), new_len};
+  as_string := talloc_string(new_len);
   random_bytes(*as_string);
   base64_encoded := base64_encode(as_string);
   assert(len <= base64_encoded.count, "we pkd up");
@@ -311,6 +323,7 @@ random_bytes :: (bytes: *[]u8) #expand {
 #import "Net";
 #import "Random";
 #import "Base64";
+#import "POSIX";
 
 
 // SDP_NO_TRICKLE

@@ -1,5 +1,9 @@
 #import "Basic";
+#import "POSIX";
 #import "Rtp";
+#import "Net";
+#import "Stun";
+#import "Socket";
 #import "ICE";
 #import "File";
 #import "Compiler";
@@ -64,11 +68,56 @@ open_stream :: () {
 
   }
 }
+// you can do rvalue refs in this language :sob:
 main :: () {
-  candidates: Ice_Candidates = .{
+  candidates: Ice_Session = .{
     config = Ice_Configuration.{
       stun_servers = .[.{ "stun.l.google.com", 19302 }],
     },
   };
-  get_reflexive_candidates(*candidates);
+  host_candidates := get_host_candidates(*candidates);
+  for host_candidates {
+    builder: String_Builder;
+    as_string := to_chrome_ice_candidate_shit(*builder, *it);
+    print("%\n", as_string);
+  }
+
+  builder: String_Builder;
+  using host_candidates[0];
+
+  slice := alloc_string(512);
+
+  sz, sock_info := udp_recv_from(xx socket, *cast([]u8)slice);
+  msg := stun_message_serialize(array_view(cast([]u8) slice, 0, sz));
+  msg_as_str := to_string(*builder, msg);
+  print("got messages from udp and all\n");
+  print("%\n", msg_as_str);
+
+  line := readline();
+  candidate := parse_ice_candidate_string(line);
+  msg_another_one := stun_message_prepare(.BIND);
+
+  send_to := SocketAddress.{
+    addr = ip_addr_from_string(candidate.connection_addr),
+    port = candidate.port,
+  };
+
+  stun_message_send(socket, send_to, *msg_another_one);
+
+  while true {
+    sz, sock_info = udp_recv_from(xx socket, *cast([]u8)slice);
+    msg = stun_message_serialize(array_view(cast([]u8) slice, 0, sz));
+    msg_as_str = to_string(*builder, msg);
+    print("got messages from udp and all\n");
+    print("%\n", msg_as_str);
+  }
+}
+
+// i can't belive i have to write this
+readline :: () -> string {
+  buffer := alloc_string(1024);
+  print("goiung to read shit bru\n");
+  bytes_read := read(STDIN_FILENO, buffer.data, cast(u64) buffer.count);
+  if bytes_read > 0 buffer.count = bytes_read;
+  return buffer;
 }

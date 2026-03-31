@@ -3,28 +3,6 @@ MAGIC_COOKIE :: cast(u32)0x2112A442;
 MTU :: 1504; // TODO(shahzad): @fixme query this on runtime but tbh do we really
              // even need this? stun requests are far more smaller than this
 
-Stun_Server_Info :: struct {
-  using #as conn: SocketConnection;
-  addrs: [..]IpAddress; // all of the Address that the dns resolved to
-};
-
-
-//  0                 1
-//  2  3  4 5 6 7 8 9 0 1 2 3 4 5
-//
-//  +--+--+-+-+-+-+-+-+-+-+-+-+-+-+
-//  |M |M |M|M|M|C|M|M|M|C|M|M|M|M|
-//  |11|10|9|8|7|1|6|5|4|0|3|2|1|0|
-//  +--+--+-+-+-+-+-+-+-+-+-+-+-+-+
-
-
-// to get that shit we do pext_(header, bytes)
-
-   // C1 and C0 represent a 2-bit encoding of
-   // the class.  A class of 0b00 is a request, a class of 0b01 is an
-   // indication, a class of 0b10 is a success response, and a class of
-   // 0b11 is an error response.
-
 Stun_Header_Type_Sane :: enum u16 {
   REQUEST                  ::  0x0;
   INDICATION               ::  0x01;
@@ -59,21 +37,25 @@ Stun_Header :: struct {
 #assert size_of(Stun_Header) == 20;
 
 Stun_Attribute_Type :: enum u16 {
-   // (Reserved)                      :: 0x0000;
+   // from RFC 8489
    MAPPED_ADDRESS                     :: 0x0001;
-   // (Reserved; was RESPONSE-ADDRESS):: 0x0002;
-   // (Reserved; was CHANGE-ADDRESS)  :: 0x0003;
-   // (Reserved; was SOURCE-ADDRESS)  :: 0x0004;
-   // (Reserved; was CHANGED-ADDRESS) :: 0x0005;
    USERNAME                           :: 0x0006;
-   // (Reserved; was PASSWORD)        :: 0x0007;
    MESSAGE_INTEGRITY                  :: 0x0008;
    ERROR_CODE                         :: 0x0009;
    UNKNOWN_ATTRIBUTES                 :: 0x000A;
-   // (Reserved; was REFLECTED-FROM)  :: 0x000B;
    REALM                              :: 0x0014;
    NONCE                              :: 0x0015;
    XOR_MAPPED_ADDRESS                 :: 0x0020;
+
+   // from RFC 5245
+   PRIORITY                           :: 0x0024; // PRIORITY // @note same as candidate priority
+   USE_CANDIDATE                      :: 0x0025; // USE-CANDIDATE
+   ICE_CONTROLLED                     :: 0x8029; // ICE-CONTROLLED
+   ICE_CONTROLLING                    :: 0x802A; // ICE-CONTROLLING
+
+   // pion uses this
+   // optional range 0x8000-0xFFFF
+   FINGERPRINT                     :: 0x8028;
 };
 
 Stun_Attribute_Header :: struct {
@@ -81,20 +63,19 @@ Stun_Attribute_Header :: struct {
   length: u16;
 };
 
-Stun_Address_Family :: enum u16 {
-  IPV4 :: 1;
-  IPV6 :: 2;
-};
+Stun_None_Attribute :: void;
 
-// make this a tagged union
 Stun_Mapped_Attribute :: struct {
-  family: Stun_Address_Family; // first 8 bits are 0
+  family: enum u16 { IPV4 :: 1; IPV6 :: 2; };
   using #as addr_info: SocketAddress;
 };
 
-Stun_None_Attribute :: void;
-Stun_Attribute_Value :: Tagged_Union(Stun_None_Attribute, Stun_Mapped_Attribute);
-// this is only for convenience
+Stun_Username_Attribute :: struct {
+  username, password: string;
+}
+
+Stun_Attribute_Value :: Tagged_Union(Stun_None_Attribute, Stun_Mapped_Attribute, Stun_Username_Attribute);
+
 Stun_Attribute :: struct {
   header: Stun_Attribute_Header;
   value: Stun_Attribute_Value;
@@ -105,52 +86,12 @@ Stun_Message :: struct {
   attributes: [..]Stun_Attribute;
 };
 
-stun_server_info_from_network_endpoint :: (endpoint: NetworkEndpoint) -> Stun_Server_Info {
-  ok, endpoints := _perform_dns_lookup(endpoint.url);
-  return .{
-    endpoint  =  endpoint,
-    addrs     =  endpoints.addrs,
-    sock      =  xx -1,
-  };
+length_align :: (length: $T, alignment := 4) -> T #expand {
+  a :: alignment;
+  return ifx length % a != 0  length + a - (length % a) else length;
 }
 
-// TODO(shahzad): @refactor use SocketConnection here
-new_udp_connection :: (ip: IpAddress, port: u16) -> s32 {
-  servaddr: sockaddr_in;
-  servaddr.sin_addr.s_addr = xx ip.ip_addr;
-  servaddr.sin_port = htons(port);
-  servaddr.sin_family = AF_INET;
-
-  sockfd := socket(AF_INET, .SOCK_DGRAM, 0);
-
-  if connect(sockfd, cast(*sockaddr)*servaddr, size_of(type_of(servaddr))) < 0 {
-      print("error: failed to set address to sockfd\n");
-      assert(false); // this can never fail
-  }
-  return sockfd;
-}
-
-udp_send :: (socket: s32, data: *u8, len: u32){
-  bytes_written := send(socket, data, xx len, 0);
-  print("wrote % bytes to udp!\n",bytes_written);
-  assert(bytes_written == len,
-      tprint("socket failed written %, wanted %, %", bytes_written, len, errno()));
-}
-
-udp_send :: (socket: s32, data: []u8){
-  bytes_written := send(socket, data.data, xx data.count, 0);
-  print("wrote % bytes to udp!\n",bytes_written);
-  assert(bytes_written == data.count,
-      tprint("socket failed written %, wanted %, %", bytes_written, data.count, errno()));
-}
-udp_recv :: (socket: s32, buf: *[]u8) -> s64 {
-  sz := recv(socket, buf.data, xx buf.count, xx 0);
-  print("read % byes from udp!\n",sz);
-  assert(sz > 0);
-  return sz;
-}
-
-stun_header_get_type :: (header: *Stun_Header) -> Stun_Header_Type_Sane {
+stun_header_sane_type :: (header: *Stun_Header) -> Stun_Header_Type_Sane {
   type :u32 = header.type;
   mask :u32 = xx (STUN_HEADER_TYPE_BIT_C0 | STUN_HEADER_TYPE_BIT_C1);
   as_sane : u32 = 0;
@@ -162,8 +103,234 @@ stun_header_get_type :: (header: *Stun_Header) -> Stun_Header_Type_Sane {
 }
 
 
-// made clacker write the printing code because i ain't spending doing allat
-print_stun_header :: (builder: *String_Builder, header: Stun_Header) -> string #expand {
+stun_message_serialize :: (res: []u8) -> Stun_Message {
+  assert(res.count >= 20, tprint("stun message should atleast be 20 bytes, given % bytes!", res.count));
+  parsed_message: Stun_Message;
+  res_header := cast(*Stun_Header)res.data;
+
+  type := stun_header_sane_type(res_header);
+
+  if type == {
+    case .REQUEST;{}
+    case .INDICATION; assert(false, "INDICATION is not implemented!");
+    case .SUCESS_RESPONSE; assert(res_header.type & xx Stun_Header_Type.BIND != 0);
+    case .ERROR_RESPONSE; assert(false, "ERROR_RESPONSE is not implemented!");
+  }
+  // TODO(shahzad): we do not parse method and assume that the server will only send the bind one
+
+  parsed_message.header = .{
+    type = xx BYTE_SWAP(res_header.type),
+    length = BYTE_SWAP(res_header.length),
+    magic_cookie = BYTE_SWAP(res_header.magic_cookie),
+    transaction_id.first = res_header.transaction_id.first,
+    transaction_id.second = res_header.transaction_id.second, // idk why but we don't have to do swap
+  };
+
+  builder: String_Builder;
+  str := to_string(*builder, parsed_message.header);
+  assert(parsed_message.header.length & 0b11 == 0); // the value is padded to be multiple of 4 bytes
+
+  // skip the payload first
+  attribute_view := array_view(res, size_of(Stun_Header), res.count);
+
+  bytes_consumed_while_parsing_attrs := 0;
+  while bytes_consumed_while_parsing_attrs < parsed_message.header.length {
+    attr : Stun_Attribute;
+    attr_header: Stun_Attribute_Header;
+    attr_value: Stun_Attribute_Value;
+
+    attr_header = .{
+      type = xx BYTE_SWAP(attribute_view.data.(*u16).*),
+      length = BYTE_SWAP((attribute_view.data + 2).(*u16).*),
+    };
+    bytes_consumed_while_parsing_attrs += 4;
+    attr.header = attr_header;
+
+    if attr_header.type == {
+      case .XOR_MAPPED_ADDRESS; {
+          attribute_value_view := array_view(attribute_view, size_of(Stun_Attribute_Header), res.count);
+          value := Stun_Mapped_Attribute.{
+            family =  xx (attribute_value_view.data + 1).(*u8).*,
+            port = xx BYTE_SWAP(BYTE_SWAP((attribute_value_view.data + 2).(*u16).*) ^ cast(u16) (MAGIC_COOKIE >> 16)),
+            addr = .{ ip_addr = BYTE_SWAP(BYTE_SWAP((attribute_value_view.data + 4).(*u32).*) ^ MAGIC_COOKIE)},
+          };
+
+          assert(value.family == .IPV4, "we do not support IPV6 at all!"); // right now atleast
+
+          set(*attr_value, value);
+      }
+      case .USERNAME; {
+        attribute_value_view := array_view(attribute_view, size_of(Stun_Attribute_Header), res.count);
+        username_password := cast(string)attribute_value_view;
+        username_password.count = attr_header.length;
+        ok, username, password := split_from_left(username_password, ":");
+        assert(ok);
+        value := Stun_Username_Attribute.{
+          username = username,
+          password = password,
+        };
+        set(*attr_value, value);
+      }
+    case; {
+      if attr_header.type < 0x8000 {
+        // we don't care about them atp
+        print("required attr_type % is unimplimented!\n", formatInt(cast(u16)attr_header.type, 16));
+        // assert(false, tprint("required attr_type % is unimplimented!", attr_header.type));
+      }
+      print("optional attr_type % is unimplimented!\n", formatInt(cast(u16)attr_header.type, 16));
+    }
+    }
+    bytes_consumed_while_parsing_attrs += length_align(attr_header.length);
+    attr.value = attr_value;
+    array_add(*parsed_message.attributes, attr);
+    
+    new_length := length_align(attr_header.length);
+    attribute_view = array_view(attribute_view, size_of(Stun_Attribute_Header) + new_length, attribute_view.count);
+  }
+  assert(bytes_consumed_while_parsing_attrs <= parsed_message.header.length);
+  return parsed_message;
+}
+
+Bytes_Writer :: struct {
+  cursor: s64;
+  bytes: []u8;
+};
+
+write_bytes :: (using writer: *Bytes_Writer, data: $T) {
+  (bytes.data + cursor).(*T).* = data;
+  cursor += size_of(T);
+}
+
+write_string :: (using writer: *Bytes_Writer, str: string) {
+  memcpy(bytes.data + cursor, str.data, str.count);
+  cursor += str.count;
+}
+
+stun_message_deserialize :: (msg: *Stun_Message) -> string {
+  total_length := msg.header.length + size_of(Stun_Header);
+  deserialized := alloc_string(total_length);
+  writer:= Bytes_Writer.{
+    cursor = 0,
+    bytes =  xx deserialized,
+  };
+
+  write_bytes(*writer, BYTE_SWAP(msg.header.type));
+  write_bytes(*writer, BYTE_SWAP(msg.header.length));
+  write_bytes(*writer, BYTE_SWAP(msg.header.magic_cookie));
+  write_bytes(*writer, msg.header.transaction_id.first);
+  write_bytes(*writer, msg.header.transaction_id.second);
+
+  for msg.attributes {
+    header := it.header;
+    value := it.value;
+
+    write_bytes(*writer, BYTE_SWAP(cast(u16)header.type));
+    write_bytes(*writer, BYTE_SWAP(header.length));
+
+    if value.tag == {
+      case Stun_Mapped_Attribute;
+        as_mapped_attr := isa(value, Stun_Mapped_Attribute); assert(as_mapped_attr != null);
+        if it.header.type == .XOR_MAPPED_ADDRESS {
+
+          write_bytes(*writer, BYTE_SWAP(cast(u16)as_mapped_attr.family));
+          write_bytes(*writer, BYTE_SWAP(BYTE_SWAP(cast(u16)as_mapped_attr.port) ^ cast(u16)(MAGIC_COOKIE >> 16)));
+          write_bytes(*writer, BYTE_SWAP(BYTE_SWAP(as_mapped_attr.addr.ip_addr) ^ MAGIC_COOKIE));
+        }else {
+          write_bytes(*writer, BYTE_SWAP(cast(u16)as_mapped_attr.family));
+          write_bytes(*writer, BYTE_SWAP(cast(u16)as_mapped_attr.port));
+          write_bytes(*writer, BYTE_SWAP(cast(u32)as_mapped_attr.addr.ip_addr));
+        }
+      case Stun_Username_Attribute;
+        as_username_attr := isa(value, Stun_Username_Attribute); assert(as_username_attr != null);
+        write_string(*writer, as_username_attr.username);
+        write_string(*writer, ":");
+        write_string(*writer, as_username_attr.password);
+    }
+  }
+  return deserialized;
+}
+
+stun_message_try_get_attribute :: (msg: Stun_Message, type: $T) -> (bool, T) {
+  undef: T = ---;
+  for msg.attributes {
+    value := isa(it.value, type);
+    if value != null return true, value;
+  }
+  return false, undef;
+}
+
+stun_header_default :: (type: Stun_Header_Type, length: u16 = 0) -> Stun_Header {
+  hi, lo := _new_transaction_id();
+
+  return Stun_Header.{
+    type = xx type,
+    length = length,
+    magic_cookie = MAGIC_COOKIE,
+    transaction_id = .{lo, hi},
+  };
+}
+
+stun_message_prepare :: (type: Stun_Header_Type, attributes: ..Stun_Attribute) -> Stun_Message {
+  total_length: u16 = 0;
+  for attributes total_length += length_align(it.header.length) + size_of(Stun_Attribute_Header);
+  
+  msg := Stun_Message.{
+    header = stun_header_default(type, total_length),
+  };
+  array_add(*msg.attributes, ..attributes);
+  return msg;
+}
+
+
+stun_message_send :: (from: Socket, to: SocketAddress, msg: *Stun_Message) -> bool {
+  deser := stun_message_deserialize(msg);
+  udp_write(from, to, xx deser);
+  return true;
+}
+
+send_binding_request :: (to: *SocketConnection) -> bool {
+  addr := server.addrs[0];
+  sock_fd := new_udp_connection(addr, to.port);
+
+  msg := stun_message_prepare(Stun_Header_Type.BIND | .REQUEST);
+
+  stun_message_send(msg, sock_fd);
+}
+
+stun_attribute_xor_username :: (sock_addr: SocketAddress) -> Stun_Attribute {
+  // we don't care about ipv6
+  // @scope support ipv6
+  header := Stun_Attribute_Header.{
+    type = .XOR_MAPPED_ADDRESS,
+    length = 8,
+  };
+
+  value: Stun_Attribute_Value;
+  set(*value, Stun_Mapped_Attribute.{
+    family = .IPV4,
+    port = sock_addr.port,
+    addr = IpAddress.{sock_addr.addr.ip_addr},
+  });
+
+  return .{
+    header = header,
+    value = value,
+  };
+}
+_new_transaction_id :: () -> (u32, u64) #expand {
+  r_get :: _cryptographically_secure_random_bytes;
+  return xx r_get(4).data, xx r_get(8).data;
+}
+
+_cryptographically_secure_random_bytes :: ($N: int) -> [N]u8 {
+  bytes: [N]u8;
+  assert(RAND_bytes(bytes.data, bytes.count) != -1, "Error generating random bytes\n");
+  return bytes;
+}
+
+
+// made clacker write the printing code because i ain't spending time doing allat
+to_string :: (builder: *String_Builder, header: Stun_Header) -> string #expand {
     print_to_builder(builder, "{\n");
     print_to_builder(builder, "    type: %,\n", cast(Stun_Header_Type)header.type);
     print_to_builder(builder, "    length: %,\n", header.length);
@@ -177,11 +344,10 @@ print_stun_header :: (builder: *String_Builder, header: Stun_Header) -> string #
     return builder_to_string(builder);
 }
 
-print_stun_message :: (builder: *String_Builder, message: Stun_Message) -> string #expand {
+to_string :: (builder: *String_Builder, message: Stun_Message) -> string #expand {
     temp_builder: String_Builder;
     print_to_builder(builder, "STUN message {\n");
-    print_to_builder(builder, "  header: %\n", print_stun_header(*temp_builder, message.header));
-
+    print_to_builder(builder, "  header: %\n", to_string(*temp_builder, message.header));
     print_to_builder(builder, "  attributes: [\n");
 
     for attr: message.attributes {
@@ -201,21 +367,16 @@ print_stun_message :: (builder: *String_Builder, message: Stun_Message) -> strin
             print_to_builder(builder, "        addr: %,\n", to_string(mapped.addr));
             print_to_builder(builder, "      }\n");
         }
-
         case .USERNAME; #through;
         case .MESSAGE_INTEGRITY; #through;
         case .ERROR_CODE; #through;
         case .UNKNOWN_ATTRIBUTES; #through;
         case .REALM; #through;
-        case .NONCE; {
-            print_to_builder(builder, "      value: <unparsed> %\n", attr.header.type);
-        }
+        case .NONCE; print_to_builder(builder, "      value: <unparsed> %\n", attr.header.type);
 
-        case; {
-            print_to_builder(builder, "      value: <unknown>\n");
+        case; print_to_builder(builder, "      value: <unknown>\n");
+        
         }
-        }
-
         print_to_builder(builder, "    },\n");
     }
 
@@ -224,170 +385,7 @@ print_stun_message :: (builder: *String_Builder, message: Stun_Message) -> strin
 
     return builder_to_string(builder);
 }
-stun_message_parse :: (res: []u8) -> Stun_Message {
-  assert(res.count >= 20, tprint("stun message should atleast be 20 bytes, given % bytes!", res.count));
-  parsed_message: Stun_Message;
-  res_header := cast(*Stun_Header)res.data;
 
-  type := stun_header_get_type(res_header);
-
-  if type == {
-    case .REQUEST; assert(false, "REQUEST is not implemented!");
-    case .INDICATION; assert(false, "INDICATION is not implemented!");
-    case .SUCESS_RESPONSE; {
-      assert(res_header.type & xx Stun_Header_Type.BIND != 0);
-    };
-    case .ERROR_RESPONSE; assert(false, "ERROR_RESPONSE is not implemented!");
-  }
-  // TODO(shahzad): we do not parse method and assume that the server will only send the bind one
-
-  parsed_message.header = .{
-    type = xx BYTE_SWAP(res_header.type),
-    length = BYTE_SWAP(res_header.length),
-    magic_cookie = BYTE_SWAP(res_header.magic_cookie),
-    transaction_id.first = res_header.transaction_id.first,
-    transaction_id.second = res_header.transaction_id.second, // idk why but we don't have to do swap
-  };
-
-  assert(parsed_message.header.length & 0x11 == 0); // the value is padded to be multiple of 4 bytes
-
-  // skip the payload first
-  attribute_view := array_view(res, size_of(Stun_Header), res.count);
-
-  bytes_consumed_while_parsing_attrs := 0;
-  while attribute_view.count > 0 {
-    attr : Stun_Attribute;
-    attr_header: Stun_Attribute_Header;
-    attr_value: Stun_Attribute_Value;
-
-    attr_header = .{
-      type = xx BYTE_SWAP(attribute_view.data.(*u16).*),
-      length = BYTE_SWAP((attribute_view.data + 2).(*u16).*),
-    };
-    bytes_consumed_while_parsing_attrs += 4;
-
-    assert(attr_header.type == .XOR_MAPPED_ADDRESS);
-    assert(attr_header.length == 8);
-
-    attr.header = attr_header;
-
-    if attr_header.type == {
-      case .XOR_MAPPED_ADDRESS; {
-        attribute_value_view := array_view(attribute_view, size_of(Stun_Attribute_Header), res.count);
-        value := Stun_Mapped_Attribute.{
-          family =  xx (attribute_value_view.data + 1).(*u8).*,
-          port = xx BYTE_SWAP(BYTE_SWAP((attribute_value_view.data + 2).(*u16).*) ^ cast(u16) (MAGIC_COOKIE >> 16)),
-          addr = .{ ip_addr = BYTE_SWAP(BYTE_SWAP((attribute_value_view.data + 4).(*u32).*) ^ MAGIC_COOKIE)},
-        };
-
-        assert(value.family == .IPV4, "we do not support IPV6 at all!"); // right now atleast
-
-        set(*attr_value, value);
-        bytes_consumed_while_parsing_attrs += 8;
-      }
-    case;
-      assert(false, tprint("attr_type % is unimplimented!", attr_header.type));
-    }
-    attr.value = attr_value;
-    array_add(*parsed_message.attributes, attr);
-
-    attribute_view = array_view(attribute_view, size_of(Stun_Attribute_Header) + attr_header.length, attribute_view.count);
-  }
-  return parsed_message;
-}
-
-stun_message_try_get_mapped_address :: (msg: Stun_Message) -> (bool, Stun_Mapped_Attribute) {
-  undef : Stun_Mapped_Attribute;
-  for msg.attributes {
-    if it.header.type == {
-      case .MAPPED_ADDRESS; #through;
-      case .XOR_MAPPED_ADDRESS;
-        value := isa(it.value, Stun_Mapped_Attribute);
-        assert(value != null);
-        return true, value.*;
-      case; continue;
-    }
-  }
-  return false, undef;
-
-}
-send_binding_request :: (server: *Stun_Server_Info) -> Stun_Message {
-  addr := server.addrs[0];
-  sock_fd := new_udp_connection(addr, server.port);
-  hi, lo := _new_transaction_id();
-
-  header := Stun_Header.{
-    type = xx BYTE_SWAP(Stun_Header_Type.BIND | .REQUEST),
-    length = 0,
-    magic_cookie = BYTE_SWAP(MAGIC_COOKIE),
-    transaction_id = .{lo, hi},
-  };
-
-  udp_send(sock_fd, xx *header, size_of(type_of(header)));
-  bytes := alloc(512);
-  slice: []u8;
-  slice.data = xx bytes;
-  slice.count = 512;
-
-  size := udp_recv(sock_fd, *slice);
-  slice.count = size;
-  
-  msg := stun_message_parse(slice);
-
-  sb: String_Builder;
-  print("response\n");
-  print("--------------------------------------------------\n");
-  print("%", print_stun_message(*sb, msg));
-  print("--------------------------------------------------\n");
-
-
-  return msg;
-}
-
-_new_transaction_id :: () -> (u32, u64) #expand {
-  r_get :: _cryptographically_secure_random_bytes;
-  return xx r_get(4).data, xx r_get(8).data;
-}
-
-_cryptographically_secure_random_bytes :: ($N: int) -> [N]u8 {
-  bytes: [N]u8;
-  assert(RAND_bytes(bytes.data, bytes.count) != -1, "Error generating random bytes\n");
-  return bytes;
-}
-
-_perform_dns_lookup :: (host: string) -> (bool, ResolvedEndpoints) {
-  ip_addrs: [..]IpAddress;
-  result: *addrinfo;
-  hints: addrinfo = .{
-    ai_family = PF_UNSPEC,
-    ai_socktype = .STREAM,
-    ai_flags = .CANONNAME,
-  };
-
-  err := getaddrinfo (to_c_string(host), null, *hints, *result);
-  if err != 0 {
-    print("failed: getaddrinfo()! %d", err);
-    return false, .{ host, ip_addrs };
-  }
-
-  iter := result;
-  while iter != null {
-    if iter.ai_family == AF_INET6 {
-      print("we do not support IPV6!\n"); // for now atleast
-      iter = iter.ai_next;
-      continue;
-    }
-    as_inet := cast(*sockaddr_in)iter.ai_addr;
-
-    print("IPv%d address: % (%)\n", ifx iter.ai_family == PF_INET6 6 else 4,
-          to_string(as_inet), to_string(iter.ai_canonname));
-
-    array_add(*ip_addrs, .{ as_inet.sin_addr.s_addr });
-    iter = iter.ai_next;
-  }
-  freeaddrinfo(result);
-  return true, .{ host, ip_addrs };
-}
 
 big_endian :: () -> bool #expand {
   x: u16 = 1;
@@ -398,8 +396,8 @@ big_endian :: () -> bool #expand {
 #if #run !big_endian() BYTE_SWAP :: byte_swap; else BYTE_SWAP ::  (input: $T) -> T { return input; };
 
 
-#import "Random";
 #import "Basic";
+#import "Random";
 #import "Bit_Operations";
 #import "Socket";
 #import "Net";
@@ -407,3 +405,4 @@ big_endian :: () -> bool #expand {
 #import "POSIX";
 #import "OpenSSL";
 #import "Tagged_Union";
+#import "String";
