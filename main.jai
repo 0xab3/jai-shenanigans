@@ -17,16 +17,16 @@ Hash_Table :: #import "Hash_Table";
 #import "Stun";
 #import "jaison";
 
-IO_Read_Kind :: struct {
+IO_OP_Kind :: struct {
   type: Type;
 };
 
 IO_TCP_Read :: struct {
-  #as using kind: IO_Read_Kind;
+  #as using kind: IO_OP_Kind;
 };
 
 IO_UDP_Read :: struct (T: Type){
-  #as using kind: IO_Read_Kind;
+  #as using kind: IO_OP_Kind;
   sock_conn: Socket_Connection;
   pc: *Peer_Connection(T);
   buf: []u8;
@@ -34,9 +34,15 @@ IO_UDP_Read :: struct (T: Type){
 };
 
 IO_File_Read :: struct {
-  #as using kind: IO_Read_Kind;
+  #as using kind: IO_OP_Kind;
   from: File;
   buf: []u8;
+};
+
+IO_Timeout :: struct(T: Type) {
+  #as using kind: IO_OP_Kind;
+  pc: *Peer_Connection(T);
+  timeout: *Time_Spec; // actual timeout that we did
 };
 
 open_stream :: () {
@@ -139,14 +145,14 @@ on_udp_packet :: (pc: *Peer_Connection, from: Socket_Address, packet: []u8) {
 }
 
 create_msghdr :: (buf: []u8) -> *msghdr {
-  iov := New(iovec,, allocator = temp);
+  iov := New(iovec);
   iov.* = .{
     iov_base = xx buf.data,
     iov_len = xx buf.count,
   };
-  addr := New(sockaddr_storage,, allocator = temp);
+  addr := New(sockaddr_storage);
 
-  msg := New(msghdr,, allocator = temp);
+  msg := New(msghdr);
   msg.msg_iov = iov;
   msg.msg_iovlen = 1;
   msg.msg_name = xx addr;
@@ -155,21 +161,54 @@ create_msghdr :: (buf: []u8) -> *msghdr {
 
 }
 
+do_connectivity_check_for_pair :: (pc: *Peer_Connection(*IO_Uring)) {
+
+  for * pc.check_list.pairs {
+    // @todo this should be media level not session level
+    pwd := pc.remote_description.sls.ice_pwd;
+
+    // @todo @proirity the tie breaker is hardcoded and we do not compute priority
+    msg := stun_message_prepare(.BIND,
+      stun_attribute_username(it.local.ufrag, it.remote.ufrag),
+      stun_attribute_ice_controlled(0xbaface7fad843c7b), 
+      stun_attribute_priority(0x7effffff),
+      stun_attribute_integrity(pwd),
+      stun_attribute_fingerprint(),
+    );
+
+    candidate_sock: Socket_Address = .{
+      ip_addr_from_string(it.remote.connection_addr),
+      htons(it.remote.port),
+    };
+
+    // log_debug("connectivity check %:% -> %:%\n",
+    //   to_string(it.local.socket_connection.addr), it.local.socket_connection.port,
+    //   to_string(candidate_sock.addr), ntohs(candidate_sock.port)
+    // );
+
+    assert(it.local.socket_connection.sock > 2);
+    sz := stun_message_send(*msg, it.local.socket_connection.sock, candidate_sock);
+    assert(sz != -1);
+  }
+}
+
 on_io_udp_read :: (pc: *Peer_Connection(*IO_Uring), read_ctx: *IO_UDP_Read(*IO_Uring), from: Socket_Address, buf: []u8) {
   msg := stun_message_serialize(buf);
+  as_sane := stun_header_kind_sane(msg);
+  if as_sane == {
+    case .REQUEST; {
+      // from is a peer reflexive address
+      response := stun_message_prepare_binding_response(from, get_local_ice_pwd(pc), msg.transaction_id);
 
-  sb: String_Builder;
-
-  // from is a peer reflexive address
-  response := stun_message_prepare_binding_response(from, get_local_ice_pwd(pc), msg.transaction_id);
-
-  assert(read_ctx.sock_conn.sock > 2);
-  stun_message_send(*response, read_ctx.sock_conn.sock, from);
-
-  as_uring := cast(*IO_Uring)read_ctx.pc.udata;
-
-  sqe := uring_op_recvmsg(as_uring, read_ctx.sock_conn.sock, read_ctx.msg_hdr, 0, read_ctx);
-  assert(sqe != null);
+      assert(read_ctx.sock_conn.sock > 2);
+      stun_message_send(*response, read_ctx.sock_conn.sock, from);
+    }
+    case .INDICATION; assert(false, "INDICATION unimplemented!");
+    case .SUCCESS_RESPONSE; {
+      // @todo we need to handle this to implement failing of ice connection
+    } 
+    case .ERROR_RESPONSE; assert(false, "unimplemented!");
+  }
 }
 
 get :: (json_val: JSON_Value, key: string, expected_type: JSON_Type) -> JSON_Value, bool {
@@ -187,7 +226,7 @@ on_ice_candidate_cb :: (pc: *Peer_Connection(*IO_Uring), candidate: *Ice_Candida
   print("%\n",as_str);
   buf := cast([]u8) alloc_string(MTU);
   hdr := create_msghdr(buf);
-  on_io_udata := New(IO_UDP_Read(*IO_Uring),, allocator = temp);
+  on_io_udata := New(IO_UDP_Read(*IO_Uring));
   // @refactor move this to temp storage of that is persistent for the
   // life time of this request??
   on_io_udata.* = .{
@@ -230,6 +269,22 @@ main :: () {
     buf = xx alloc_string(4096 + 2048),
   };
   sqe := uring_op_read(uring, STDIN_FILENO, file_read_op.buf, xx file_read_op); assert(sqe != null);
+  assert(sqe != null);
+
+  // @perf not really but do not do malloc here
+  timeout := New(Time_Spec);
+  timeout.tv_sec = 1;
+  timeout.tv_nsec = 0;
+
+  io_timeout_op := New(IO_Timeout(*IO_Uring));
+  io_timeout_op.* = .{
+    type = IO_Timeout(*IO_Uring),
+    pc = *pc,
+    timeout = timeout,
+  };
+
+  sqe = uring_op_timeout(uring, timeout, io_timeout_op);
+  assert(sqe != null);
 
   cqes_original: [5] IO_Uring_CQE;
   cqes := array_view(cqes_original, 0, 5);
@@ -245,7 +300,7 @@ main :: () {
     for copied {
       // here we should remove the event from the peer connection or something like that
       udata := it.user_data;
-      kind := cast(*IO_Read_Kind)udata;
+      kind := cast(*IO_OP_Kind)udata;
       if kind.type == {
         case IO_TCP_Read();
           assert(false, "unimplemented!");
@@ -261,7 +316,13 @@ main :: () {
           buf := array_view(udp_read.buf, 0, it.res);
           sock_addr := socket_address_from_sockaddr(sin);
           on_io_udp_read(*pc, udp_read, sock_addr, buf);
+
+          as_uring := cast(*IO_Uring)udp_read.pc.udata;
+          sqe := uring_op_recvmsg(as_uring, udp_read.sock_conn.sock, udp_read.msg_hdr, 0, udp_read);
+          assert(sqe != null);
         case IO_File_Read; // @TODO @priority this assumes that this will always be a line
+          // @todo @priority this is ass as we just use scope variables like pc and all without
+          // taking it from IO_File_Read
           if it.res < 0 {
             print("File Closed!\n"); assert(false);
             continue;
@@ -278,10 +339,26 @@ main :: () {
             parsed_sdp := parse_sdp(sdp.str);
             set_remote_description(*pc, parsed_sdp);
           }else {
-            candidate, ok := get(root, "candidate", .STRING);
-            if ok { print("got candidate bro less goo\n"); }
+            candidate_jvalue, ok := get(root, "candidate", .STRING); 
+            if !ok continue;
+            // @leak
+            candidate_str := copy_string(candidate_jvalue.str);
+            candidate := parse_ice_candidate_string(candidate_str);
+            add_ice_candidate(*pc, candidate);
+            // figure out all the bs with the component id shit bru
+            assert(pc.check_list.pairs.count != 0);
           }
           sqe := uring_op_read(uring, STDIN_FILENO, file_read.buf, xx file_read_op);
+          assert(sqe != null);
+
+        case IO_Timeout(*IO_Uring);
+          assert(it.res == 0 || it.res == -62); // handle cancel time out or smth like that??? idk
+
+          as_timeout := cast(*IO_Timeout(*IO_Uring)) kind;
+          do_connectivity_check_for_pair(as_timeout.pc);
+
+          // we can have a multishoot timeout but nah cause kernel>6.4 and we will have to do cancellations
+          sqe = uring_op_timeout(as_timeout.pc.udata, as_timeout.timeout, as_timeout);
           assert(sqe != null);
       };
     }

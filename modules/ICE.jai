@@ -70,7 +70,7 @@ Valid_List :: struct {
   candidates: [..]*Ice_Candidate;
 };
 
-can_pair :: (c1: *Ice_Candidate, c2: *Ice_Candidate) {
+can_pair :: (c1: *Ice_Candidate, c2: *Ice_Candidate) -> bool {
   return c1.componenet_id == c2.componenet_id && c1.transport == c2.transport;
 }
 
@@ -93,6 +93,7 @@ parse_ice_candidate_string :: (ice_string: string) -> Ice_Candidate {
   raddr: string = "0.0.0.0";
   rport: u16 = 0;
 
+  // @todo @priority remove all assertions as the string we get is from network
   foundation:,       ok  =  parse_token(*ice_string_view);  assert(ok);
   componenet_id:,    ok  =  parse_int(*ice_string_view);    assert(ok);
   transport:,        ok  =  parse_token(*ice_string_view);  assert(ok);
@@ -255,7 +256,7 @@ get_host_candidates :: (candidates: *[..]Ice_Candidate) -> []Ice_Candidate {
   getifaddrs(*iter);
 
   mark := candidates.count;
-  component_id := 0; // @scope make this not be hardcoded
+  component_id := RTP_COMPONENT_ID; // @scope @priority make this not be hardcoded
   RANDOM_PORT :: 4264; // random port that i chose for no reason
 
   sock_fd := xx socket(AF_INET, .DGRAM, xx 0);
@@ -275,8 +276,6 @@ get_host_candidates :: (candidates: *[..]Ice_Candidate) -> []Ice_Candidate {
         print("addr is this %\n", to_string(p_addr));
         assert(ret == 0);
       }
-      assert(set_blocking(sock_fd, false));
-
       // @useless we are not supporting ipv6 anyways
       family: Ip_Family =
         ifx p_addr.sin_family == AF_INET then .IPV4

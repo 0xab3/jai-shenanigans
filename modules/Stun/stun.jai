@@ -2,10 +2,10 @@ MAGIC_COOKIE :: cast(u32)0x2112A442;
 
 // @remove ufrag and upwd should come from ice candidates
 Stun_Message_Kind_Sane :: enum u16 {
-  REQUEST                  ::  0x0;
-  INDICATION               ::  0x01;
-  SUCCESS_RESPONSE          ::  0x10;
-  ERROR_RESPONSE           ::  0x11;
+  REQUEST              ::  0b00;
+  INDICATION           ::  0b01;
+  SUCCESS_RESPONSE     ::  0b10;
+  ERROR_RESPONSE       ::  0b11;
 };
 
 STUN_HEADER_TYPE_BIT_C0 :: 1 << 4;
@@ -133,7 +133,7 @@ stun_message_serialize :: (res: []u8) -> Stun_Message {
   if kind == {
     case .REQUEST;{}
     case .INDICATION; assert(false, "INDICATION is not implemented!");
-    case .SUCCESS_RESPONSE; assert(res_header.kind & xx Stun_Message_Kind.BIND != 0);
+    case .SUCCESS_RESPONSE; assert(BYTE_SWAP(res_header.kind) & xx Stun_Message_Kind.BIND != 0);
     case .ERROR_RESPONSE; assert(false, "ERROR_RESPONSE is not implemented!");
   }
   // TODO(shahzad): we do not parse method and assume that the server will only send the bind one
@@ -336,7 +336,6 @@ stun_message_deserialize :: (msg: *Stun_Message) -> string {
       case Stun_Attribute_Fingerprint; {
         as_fingerprint := isa(value, Stun_Attribute_Fingerprint); assert(as_fingerprint != null);
         fingerprint := 0x5354554e ^ crc32(array_view(writer.bytes, 0, writer.cursor - 4));
-        log_info("fingerprint %\n",fingerprint);
         write_bytes(*writer, BYTE_SWAP(fingerprint));
       }
     }

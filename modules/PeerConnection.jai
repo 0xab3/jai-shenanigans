@@ -40,11 +40,8 @@ add_ice_candidate :: (pc: *Peer_Connection($T), candidate: Ice_Candidate) {
   array_add(*pc.remote_candidates, candidate);
   remote := *pc.remote_candidates.data[pc.remote_candidates.count - 1];
 
-  for pc.local_candidates {
-    if !can_pair(*it, remote) continue;
-    // @remove if works
-    asset(*it == *pc.local_candidates[it_index], tprint("%, %\n", *it, *pc.local_candidates[it_index]));
-    check_list_add(*pc.check_list, .{ *it, remote });
+  for * pc.local_candidates {
+    if can_pair(it, remote) check_list_add(*pc.check_list, .{ it, remote });
   }
 }
 new_peer_connection :: (config: Peer_Configuration, udata: $T) -> Peer_Connection(T) {
@@ -84,11 +81,13 @@ get_local_ice_pwd :: (pc: Peer_Connection($T)) -> string {
 
 gather_local_candidates :: (pc: *Peer_Connection($T)) {
   // @todo this should only be triggered when we add a new componenet
-  host_candidates := get_host_candidates(*pc.local_candidates);
+  candidates: [..]Ice_Candidate;
+  host_candidates := get_host_candidates(*candidates,, allocator = temp);
   // NOTE: @important srflx/relay candidates will do a read call from network that is bloacking
   // figure out the architecture for that, we can put the request in io_uring, on response we can
   // parse the response and have a reference to peer connection in it
   // (and put it in the type of the candidate??? idk how we will do that tho)
+  // add_local_candidates(pc, ..host_candidates);
   add_local_candidates(pc, ..host_candidates);
 }
 
