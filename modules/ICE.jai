@@ -17,45 +17,62 @@ ICE_OPTION :: "trickle"; // trickle
 
 Ice_Configuration :: struct {
   // TODO(shahzad): @feat implement parsing of stun server's string
-  stun_servers: []NetworkEndpoint;
-  turn_servers: []NetworkEndpoint;
+  stun_servers: []Network_Endpoint;
+  turn_servers: []Network_Endpoint;
+};
+
+Ice_Candidate_Pair :: struct {
+  local: *Ice_Candidate;
+  remote: *Ice_Candidate;
 };
 
 Ice_Candidate :: struct {
-  Type :: enum {HOST; SRFLX; PRFLX; RELAY;};
-  Transport_Type :: enum {UDP; TCP;}; // always udp in our case
+  Kind :: enum {HOST; SRFLX; PRFLX; RELAY;};
+  Transport_Kind :: enum {UDP; TCP;}; // always udp in our case
   foundation: string; // from 9-32 ice-chars (ALPHA / DIGIT / "+" / "/")
   componenet_id: u8; // 1-256 (ik we are missing 1 but we are not having 200+ components in our stream)
-  transport: Transport_Type; //
+  transport: Transport_Kind; //
   priority: u32; // 1 - 1*10 digits
   connection_addr: string; // we can have mdns addresses here (for privacy :sob:)
   port: u16;
-  candidate_type: Type;
+  candidate_type: Kind;
 
   // https://datatracker.ietf.org/doc/html/rfc8839#section-5.1-4.16
   // <rel_addr> and <rel_port> MUST be present for server-reflexive, peer-reflexive, and relayed candidates
-  rel_addr: IpAddress; // NOTE(shahzad): @important not present in HOST for some reason
+  rel_addr: Ip_Address; // NOTE(shahzad): @important not present in HOST for some reason
   rel_port: u16;
   ufrag: string;
   network_cost: u16; // 0-999 "cost" of taking the network, lower is better
                     // (chromium defines wifi to be 0 and 5g to be 250 or smth idk)
+
+  family: Ip_Family;
 
   // @remove this is a part of json not "Ice_Candidate"
   sdp_mid: string;
   sdp_mline_index: u32;
   
   // @remove ts has to go
-  socket: Socket = xx -1;
-};
+  socket_connection: Socket_Connection = .{sock = -1};
 
+};
 
 Check_List :: struct {
-  candidates: [..]*Ice_Candidate;
+  State :: enum {
+    RUNNING;
+    COMPLETED;
+    FAILED;
+  }
+  pairs: [..]Ice_Candidate_Pair;
+  state: State = .RUNNING;
 };
+
 Valid_List :: struct {
   candidates: [..]*Ice_Candidate;
 };
 
+can_pair :: (c1: *Ice_Candidate, c2: *Ice_Candidate) {
+  return c1.componenet_id == c2.componenet_id && c1.transport == c2.transport;
+}
 
 
 compute_ice_priority :: () {
@@ -65,7 +82,6 @@ compute_ice_priority :: () {
 ice_parser_get_token :: (ice_string: string, is_ip: bool) -> tok:string,rest:string {
   assert(!is_ip, "unimplemented");
 }
-
 
 parse_ice_candidate_string :: (ice_string: string) -> Ice_Candidate {
   ice_string_view := ice_string;
@@ -97,7 +113,7 @@ parse_ice_candidate_string :: (ice_string: string) -> Ice_Candidate {
     if !equal(rport_as_str, "0")
       rport, ok = xx string_to_int(rport_as_str); assert(ok);
   }
-  transport_type: Ice_Candidate.Transport_Type =
+  transport_type: Ice_Candidate.Transport_Kind =
       ifx equal(transport, "udp") xx .UDP
       else ifx equal(transport, "tcp") xx .TCP else { assert(false); xx .TCP;};
 
@@ -118,8 +134,7 @@ parse_ice_candidate_string :: (ice_string: string) -> Ice_Candidate {
 
   while ice_string_view.count > 0 {
     token:,  ok  =  parse_token(*ice_string_view); if !ok break;
-    value:,  ok  =  parse_token(*ice_string_view); if !ok break;
-
+    value:,  ok  =  parse_token(*ice_string_view, ";=(),\""); if !ok break;
     if equal(token, "generation") {}
     else if equal(token, "ufrag") {
       candidate.ufrag = value;
@@ -130,7 +145,7 @@ parse_ice_candidate_string :: (ice_string: string) -> Ice_Candidate {
   }
   return candidate;
 }
-new_ice_candidate :: (addr: SocketAddress, type: Ice_Candidate.Type, component_id: u8) -> Ice_Candidate {
+new_ice_candidate :: (addr: Socket_Address, type: Ice_Candidate.Kind, component_id: u8) -> Ice_Candidate {
   candidate: Ice_Candidate;
   candidate = .{
     foundation = ICE_FOUNDATION,
@@ -140,7 +155,7 @@ new_ice_candidate :: (addr: SocketAddress, type: Ice_Candidate.Type, component_i
     connection_addr = to_string(addr.addr),
     port = addr.port,
     candidate_type = type,
-    rel_addr = IpAddress.{0},
+    rel_addr = Ip_Address.{},
     rel_port = 0,
     ufrag = UFRAG,
     network_cost = 999,
@@ -151,7 +166,7 @@ new_ice_candidate :: (addr: SocketAddress, type: Ice_Candidate.Type, component_i
   return candidate;
 }
 
-ice_candidate_type_from_string :: (as_str: string) -> Ice_Candidate.Type {
+ice_candidate_type_from_string :: (as_str: string) -> Ice_Candidate.Kind {
   if equal(as_str, "host") {
     return .HOST;
   }else if equal(as_str, "srflx") {
@@ -165,7 +180,7 @@ ice_candidate_type_from_string :: (as_str: string) -> Ice_Candidate.Type {
   }
   assert(false, "unreachable"); return .HOST;
 }
-to_string :: (typ: Ice_Candidate.Type) -> string {
+to_string :: (typ: Ice_Candidate.Kind) -> string {
   if typ == {
     case .HOST;
       return "host";
@@ -182,7 +197,7 @@ to_string :: (typ: Ice_Candidate.Type) -> string {
   return "";
 }
 
-to_string :: (typ: Ice_Candidate.Transport_Type) -> string {
+to_string :: (typ: Ice_Candidate.Transport_Kind) -> string {
   if typ == {
     case .UDP;
       return "udp";
@@ -235,14 +250,7 @@ to_chrome_ice_candidate_shit :: (builder: *String_Builder, using candidate :*Ice
   return builder_to_string(builder);
 }
 
-
-// @refactor Ice_Session?? i don't think thats a right name
-Ice_Session :: struct {
-  candidates: [..]Ice_Candidate;
-  config : Ice_Configuration;
-};
-
-get_host_candidates :: (using session: *Ice_Session) -> []Ice_Candidate {
+get_host_candidates :: (candidates: *[..]Ice_Candidate) -> []Ice_Candidate {
   iter: *ifaddrs;
   getifaddrs(*iter);
 
@@ -262,31 +270,45 @@ get_host_candidates :: (using session: *Ice_Session) -> []Ice_Candidate {
       // @need_context idk why we have to do byte swap for this
       if BYTE_SWAP(ip_addr) == INADDR_LOOPBACK continue;
 
-      ret := bind(cast(Socket)sock_fd, BYTE_SWAP(ip_addr), RANDOM_PORT);
-      assert(ret == 0);
-      as_sock_addr := SocketAddress.{
-        addr = IpAddress.{ ip_addr },
+      ret := bind(cast(Socket)sock_fd, BYTE_SWAP(ip_addr), RANDOM_PORT); 
+      if ret != 0 {
+        print("addr is this %\n", to_string(p_addr));
+        assert(ret == 0);
+      }
+      assert(set_blocking(sock_fd, false));
+
+      // @useless we are not supporting ipv6 anyways
+      family: Ip_Family = 
+        ifx p_addr.sin_family == AF_INET then .IPV4
+        else ifx p_addr.sin_family == AF_INET6 then .IPV6
+        else { assert(false); .IPV4;};
+
+      as_sock_addr := Socket_Address.{
+        addr = Ip_Address.{ family, ip_addr },
         port = RANDOM_PORT,
       };
       ice_candidate := new_ice_candidate(as_sock_addr, .HOST, xx component_id);
-      ice_candidate.socket = sock_fd;
+      ice_candidate.socket_connection = .{
+        as_sock_addr,
+        sock_fd,
+      };
 
-      array_add(*candidates, ice_candidate);
+      array_add(candidates, ice_candidate);
     }
   }
   freeifaddrs(iter);
 
-  return array_view(candidates, mark, candidates.count);
+  return array_view(candidates.*, mark, candidates.count);
 }
 
 
 // @incomplete
-get_reflexive_candidates :: (using candidates: *Ice_Session) {
+get_reflexive_candidates :: (using candidates: []Ice_Candidate) {
   server := config.stun_servers[0];
   info := stun_server_info_from_network_endpoint(server);
   response := send_binding_request(*info);
 
-  ok: bool; ip_info_attr: SocketAddress;
+  ok: bool; ip_info_attr: Socket_Address;
   ok, ip_info_attr = stun_message_try_get_mapped_address(response);
 }
 get_relay_candidates :: () {
@@ -315,6 +337,7 @@ random_bytes :: (bytes: *[]u8) #expand {
   }
 }
 
+#scope_file
 #import "Stun";
 #import "Socket";
 #import "String";
