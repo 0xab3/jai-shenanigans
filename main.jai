@@ -121,9 +121,9 @@ handle_stun_success_response :: (pc: *Peer_Connection, msg: Stun_Message, from: 
   //   ip_addr_from_string(candidate.connection_addr),
   //   candidate.port,
   // };
-  // 
+  //
   // print("sent to %:%\n",to_string(candidate_sock.addr), candidate.port);
-  // 
+  //
   // sz = stun_message_send(host.socket, candidate_sock, *msg_another_one);
 }
 on_udp_packet :: (pc: *Peer_Connection, from: Socket_Address, packet: []u8) {
@@ -190,7 +190,7 @@ on_ice_candidate_cb :: (pc: *Peer_Connection(*IO_Uring), candidate: *Ice_Candida
   on_io_udata := New(IO_UDP_Read(*IO_Uring),, allocator = temp);
   // @refactor move this to temp storage of that is persistent for the
   // life time of this request??
-  on_io_udata.* = .{ 
+  on_io_udata.* = .{
     pc = pc,
     buf = buf,
     type = IO_UDP_Read(*IO_Uring),
@@ -219,7 +219,7 @@ main :: () {
   assert(parse_err == .Success, "we are cooked bru");
   set_local_description(*pc, local_desc);
 
-  // this should be internal to peerconnection after we have set the local description 
+  // this should be internal to peerconnection after we have set the local description
   gather_local_candidates(*pc);
 
   // @leak
@@ -241,7 +241,7 @@ main :: () {
       log_err("error occured while cqes_copy : %\n", os_err);
       assert(false);
     }
-    
+
     for copied {
       // here we should remove the event from the peer connection or something like that
       udata := it.user_data;
@@ -273,7 +273,7 @@ main :: () {
           sdp:, ok = get(root, "sdp", .STRING);
           if ok {
             typ:, ok = get(root, "type", .STRING);
-            assert(ok); 
+            assert(ok);
             assert(equal(typ.str, "offer"));
             parsed_sdp := parse_sdp(sdp.str);
             set_remote_description(*pc, parsed_sdp);
@@ -308,7 +308,7 @@ main :: () {
   //       on_udp_packet(xx it.data.ptr, addr, bytes);
   //     }
   //   }
-  //   if it.events & xx Event_Kind.OUT != 0 { 
+  //   if it.events & xx Event_Kind.OUT != 0 {
   //     assert(false, "unreachable"); // for now
   //   }
   //   if it.events & EPOLLERR != 0 {
@@ -323,7 +323,7 @@ main :: () {
   //   }
   // }
 
-  
+
 
   // first shit
   // sz, sock_info = udp_recv_from(xx host.socket, *cast([]u8)slice);
@@ -333,7 +333,7 @@ main :: () {
   //
   // print("sock_info.port %\n",sock_info.port);
   // reply := stun_message_prepare(.BIND |.SUCCESS_RESPONSE,
-  //   // fix this 
+  //   // fix this
   //   stun_attribute_xor_mapped(sock_info),
   //   stun_attribute_integrity(UPWD),
   // );

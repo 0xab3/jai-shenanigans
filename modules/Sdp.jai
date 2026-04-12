@@ -80,7 +80,7 @@ parse_sdp :: (sdp_as_str: string) -> Session_Description, SDP_Parse_Error {
         if state == .PARSING_SLS {
           array_add(*sdp.sls.attributes, value);
           continue;
-        } 
+        }
 
         found, _attrib_name, _attrib_value := split_from_left(value, ":");
         attrib_name := trim(_attrib_name);
@@ -106,7 +106,7 @@ parse_sdp :: (sdp_as_str: string) -> Session_Description, SDP_Parse_Error {
       }
       case #char "m"; {
         // previous media description is filled meaning we have to push it
-        if md.name.count != 0 array_add(*sdp.mds, md); 
+        if md.name.count != 0 array_add(*sdp.mds, md);
         md = .{};
         md.name = value;
         state = .PARSING_MD;

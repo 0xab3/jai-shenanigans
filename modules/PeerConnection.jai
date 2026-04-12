@@ -22,7 +22,7 @@ check_list_add :: (list: *Check_List, pair: Ice_Candidate_Pair) {
 }
 
 // @remove this shit has to go
-add_local_candidates :: (pc: *Peer_Connection($T), candidates: ..Ice_Candidate) 
+add_local_candidates :: (pc: *Peer_Connection($T), candidates: ..Ice_Candidate)
 {
   array_add(*pc.local_candidates, ..candidates);
   for candidates {
@@ -87,7 +87,7 @@ gather_local_candidates :: (pc: *Peer_Connection($T)) {
   host_candidates := get_host_candidates(*pc.local_candidates);
   // NOTE: @important srflx/relay candidates will do a read call from network that is bloacking
   // figure out the architecture for that, we can put the request in io_uring, on response we can
-  // parse the response and have a reference to peer connection in it 
+  // parse the response and have a reference to peer connection in it
   // (and put it in the type of the candidate??? idk how we will do that tho)
   add_local_candidates(pc, ..host_candidates);
 }

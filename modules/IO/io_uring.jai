@@ -15,7 +15,7 @@ Submission_Queue :: struct {
   array: *u32;
   flags: *u32;
   entries: []IO_Uring_SQE;
-}; 
+};
 
 Completion_Queue :: struct {
   head: *u32;
@@ -27,7 +27,7 @@ Completion_Queue :: struct {
 
 IO_Uring :: struct {
   fd: s32;
-  ring_base_ptr: *void; 
+  ring_base_ptr: *void;
   ring_size: u64;
   flags: IORING_Setup_Flags;
   s_queue: Submission_Queue;
@@ -65,13 +65,13 @@ uring_init :: (uring: *IO_Uring, params: *IO_Uring_Params) -> IO_Uring_Error {
            uring.fd, IORING_OFF_SQ_RING);
 
   if io_ring == MAP_FAILED return .AllocationFailed;
-  
+
   uring.s_queue.head = io_ring + params.sq_off.head;
   uring.s_queue.tail = io_ring + params.sq_off.tail;
   uring.s_queue.mask = (io_ring + params.sq_off.ring_mask).(*u32).*;
   uring.s_queue.array = io_ring + params.sq_off.array;
   uring.s_queue.flags = io_ring + params.sq_off.flags;
-  uring.s_queue.entries.data = 
+  uring.s_queue.entries.data =
     mmap(null, params.sq_entries * size_of(IO_Uring_SQE), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, uring.fd, IORING_OFF_SQES);
   uring.s_queue.entries.count = params.sq_entries;
 
@@ -119,7 +119,7 @@ sqe_get :: (using uring: *IO_Uring) -> *IO_Uring_SQE {
   if (cast(int)atomic_read(s_queue.tail) - cast(int)head) > s_queue.entries.count {
     return null; // we are cooked
   }
-  
+
   tail := atomic_add(s_queue.tail, 1);
   index := tail & s_queue.mask;
 
@@ -213,7 +213,7 @@ __io_uring_enter :: inline (uring: *IO_Uring, to_submit: u32, min_complete: u32,
   ret := cast(s32)syscall(SYS_io_uring_enter, uring.fd, to_submit, min_complete, flags, null);
   if ret < 0 return 0, xx -ret;
   return xx ret, 0;
-  
+
 }
 __io_uring_enter :: inline (uring: *IO_Uring, to_submit: u32, min_complete: u32, flags: u32, sig: *sigset_t) -> u32, OS_Error_Code {
   ret := cast(s32)syscall(SYS_io_uring_enter, uring.fd, to_submit, min_complete, flags, sig);

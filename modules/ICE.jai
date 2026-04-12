@@ -50,7 +50,7 @@ Ice_Candidate :: struct {
   // @remove this is a part of json not "Ice_Candidate"
   sdp_mid: string;
   sdp_mline_index: u32;
-  
+
   // @remove ts has to go
   socket_connection: Socket_Connection = .{sock = -1};
 
@@ -270,7 +270,7 @@ get_host_candidates :: (candidates: *[..]Ice_Candidate) -> []Ice_Candidate {
       // @need_context idk why we have to do byte swap for this
       if BYTE_SWAP(ip_addr) == INADDR_LOOPBACK continue;
 
-      ret := bind(cast(Socket)sock_fd, BYTE_SWAP(ip_addr), RANDOM_PORT); 
+      ret := bind(cast(Socket)sock_fd, BYTE_SWAP(ip_addr), RANDOM_PORT);
       if ret != 0 {
         print("addr is this %\n", to_string(p_addr));
         assert(ret == 0);
@@ -278,7 +278,7 @@ get_host_candidates :: (candidates: *[..]Ice_Candidate) -> []Ice_Candidate {
       assert(set_blocking(sock_fd, false));
 
       // @useless we are not supporting ipv6 anyways
-      family: Ip_Family = 
+      family: Ip_Family =
         ifx p_addr.sin_family == AF_INET then .IPV4
         else ifx p_addr.sin_family == AF_INET6 then .IPV6
         else { assert(false); .IPV4;};

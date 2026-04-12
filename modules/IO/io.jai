@@ -25,7 +25,7 @@ io_add_event :: (io: IO, fd: s32, kind: Event_Kind, udata: *void) {
   if epoll_ctl(io.epoll_fd, .ADD, event.fd, &event.inner) == -1 {
     log_err("epoll_ctl: error is this %\n", errno());
     assert(false, "unreachable!"); // for now
-  } 
+  }
 }
 
 io_read_event :: (io: IO, fd: s32) {

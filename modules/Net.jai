@@ -30,7 +30,7 @@ Ip_Address :: struct { // TODO(shahzad): @feat add ipv6
 };
 
 socket_address_from_sockaddr :: (addr: sockaddr_in) -> Socket_Address {
-  family: Ip_Family = 
+  family: Ip_Family =
     ifx addr.sin_family == AF_INET then .IPV4
     else ifx addr.sin_family == AF_INET6 then .IPV6
     else { assert(false); .IPV4;};

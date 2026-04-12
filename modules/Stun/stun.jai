@@ -75,20 +75,20 @@ Stun_Attribute_Priority :: struct {
   priority: u32;
 };
 
-Stun_Attribute_Integrity :: struct { 
+Stun_Attribute_Integrity :: struct {
   key: string;
   hmac: string;
 };
 
 Stun_Attribute_IceControl :: struct {tie_breaker: u64;};
 
-Stun_Attribute_Fingerprint :: struct { 
+Stun_Attribute_Fingerprint :: struct {
   crc: s32;
 };
 
 Stun_Attribute_Value :: Tagged_Union(
-  Stun_Attribute_None, 
-  Stun_Attribute_Mapped, 
+  Stun_Attribute_None,
+  Stun_Attribute_Mapped,
   Stun_Attribute_Username,
   Stun_Attribute_Priority,
   Stun_Attribute_Integrity,
@@ -169,10 +169,10 @@ stun_message_serialize :: (res: []u8) -> Stun_Message {
     if attr_header.kind == {
       case .XOR_MAPPED_ADDRESS; {
           attribute_value_view := array_view(attribute_view, size_of(Stun_Attribute_Header), res.count);
-          value := Stun_Attribute_Mapped.{ 
+          value := Stun_Attribute_Mapped.{
             port = xx BYTE_SWAP(BYTE_SWAP((attribute_value_view.data + 2).(*u16).*) ^ cast(u16) (MAGIC_COOKIE >> 16)),
-            addr = .{ 
-            ip_addr = BYTE_SWAP(BYTE_SWAP((attribute_value_view.data + 4).(*u32).*) ^ MAGIC_COOKIE), 
+            addr = .{
+            ip_addr = BYTE_SWAP(BYTE_SWAP((attribute_value_view.data + 4).(*u32).*) ^ MAGIC_COOKIE),
             family =  xx (attribute_value_view.data + 1).(*u8).*},
           };
 
@@ -230,7 +230,7 @@ stun_message_serialize :: (res: []u8) -> Stun_Message {
     bytes_consumed_while_parsing_attrs += length_align(attr_header.length);
     attr.value = attr_value;
     array_add(*parsed_message.attributes, attr);
-    
+
     new_length := length_align(attr_header.length);
     attribute_view = array_view(attribute_view, size_of(Stun_Attribute_Header) + new_length, attribute_view.count);
   }
@@ -405,7 +405,7 @@ stun_message_add_attribute :: (msg: *Stun_Message, attributes: ..Stun_Attribute)
 stun_message_prepare :: (kind: Stun_Message_Kind, attributes: ..Stun_Attribute) -> Stun_Message {
   total_length: u16 = 0;
   for attributes total_length += length_align(it.header.length) + size_of(Stun_Attribute_Header);
-  
+
   msg := Stun_Message.{
     header = stun_header_default(kind, total_length),
   };
@@ -605,7 +605,7 @@ to_string :: (builder: *String_Builder, message: Stun_Message) -> string #expand
           case .NONCE; print_to_builder(builder, "      value: <unparsed> %\n", attr.header.kind);
 
           case; print_to_builder(builder, "      value: <unknown>\n");
-        
+
         }
         print_to_builder(builder, "    },\n");
     }

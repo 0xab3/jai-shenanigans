@@ -41,7 +41,7 @@ hmac_sha1 :: (key: string, msg: string) -> string {
 SSL_error_string :: inline (ret: s32) -> string {
   return to_string(ERR_error_string());
 }
- 
+
 OpenSSL_add_all_algorithms :: inline () -> s32 {
     return OPENSSL_init_crypto(OPENSSL_INIT_ADD_ALL_CIPHERS
                                | OPENSSL_INIT_ADD_ALL_DIGESTS
