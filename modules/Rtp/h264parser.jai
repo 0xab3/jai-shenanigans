@@ -21,5 +21,6 @@ extract_nalu :: (payload : []u8) -> ([]u8, []u8, bool) {
   return undef, undef, false;
 }
 
+#scope_file
 #import "Basic";
 #import "String";

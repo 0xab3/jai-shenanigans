@@ -64,7 +64,7 @@ rtp_sender_new :: (ip: string, port: u16) -> RtpSender {
   sockfd := socket(AF_INET, .SOCK_DGRAM, 0);
 
   if connect(sockfd, cast(*sockaddr)*servaddr, size_of(type_of(servaddr))) < 0 {
-      print("error: failed to set address to sockfd\n");
+      log_err("error: failed to set address to sockfd\n");
       assert(false); // this can never fail
   }
 
@@ -105,6 +105,8 @@ write_rtp :: (using ctx: *RtpSender, nalu: []u8, timestamp: u32) {
   assert(bytes_written == packet_len);
 }
 
+#scope_file
 #import "Basic";
 #import "Socket";
 #import "POSIX";
+#import "Log";
