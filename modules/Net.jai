@@ -1,29 +1,49 @@
-NetworkEndpoint :: struct {
+MTU :: 1504; // TODO(shahzad): @fixme query this on runtime
+
+Network_Interface :: struct {
+  name: string;
+}
+Network_Endpoint :: struct {
   url: string;
   port: u16;
 }
-ResolvedEndpoints :: struct {
+Resolved_Endpoints :: struct {
   url: string;
-  addrs: [..]IpAddress; // a single network endpoint have multiple IPs
+  addrs: [..]Ip_Address; // a single network endpoint have multiple IPs
 };
 
-SocketAddress :: struct {
-  addr: IpAddress;
+Socket_Address :: struct {
+  addr: Ip_Address;
   port: u16;
 };
 
-SocketConnection :: struct {
-  using #as sock_addr: SocketAddress;
+Socket_Connection :: struct {
+  using #as sock_addr: Socket_Address;
   sock: Socket = xx -1;
 };
+Ip_Family :: enum { IPV4 :: 1; IPV6 :: 2; };
 
-IpAddress :: struct { // TODO(shahzad): @feat add ipv6
+Ip_Address :: struct { // TODO(shahzad): @feat add ipv6
   IpV4 :: u32; // is this unix specific??
+  family: Ip_Family;
   ip_addr: IpV4;
 };
 
+socket_address_from_sockaddr :: (addr: sockaddr_in) -> Socket_Address {
+  family: Ip_Family = 
+    ifx addr.sin_family == AF_INET then .IPV4
+    else ifx addr.sin_family == AF_INET6 then .IPV6
+    else { assert(false); .IPV4;};
 
-to_string :: (addr: IpAddress) -> string {
+  return .{
+    port = addr.sin_port,
+    addr = .{
+      family = family,
+      ip_addr = addr.sin_addr.s_addr,
+    },
+  };
+}
+to_string :: (addr: Ip_Address) -> string {
   // yanked from Socket/module.jai
   builder: String_Builder;
   append_address(*builder, addr.ip_addr);
@@ -31,16 +51,13 @@ to_string :: (addr: IpAddress) -> string {
 }
 
 // @scope ipv4 only @unsafe we do not check the length of the array
-ip_addr_from_string :: (addr: string) -> IpAddress {
+ip_addr_from_string :: (addr: string) -> Ip_Address {
   parsed_addr: in_addr;
   inet_aton(addr.data, *parsed_addr);
-  return .{parsed_addr.s_addr};
+  return .{.IPV6, parsed_addr.s_addr};
 }
 
-
-
-// TODO(shahzad): @refactor use SocketConnection here
-new_udp_connection :: (ip: IpAddress, port: u16) -> SocketConnection {
+udp_socket_client :: (ip: Ip_Address, port: u16) -> Socket {
   servaddr: sockaddr_in;
   servaddr.sin_addr.s_addr = xx ip.ip_addr;
   servaddr.sin_port = htons(port);
@@ -49,44 +66,49 @@ new_udp_connection :: (ip: IpAddress, port: u16) -> SocketConnection {
   sockfd := socket(AF_INET, .SOCK_DGRAM, 0);
 
   if connect(sockfd, cast(*sockaddr)*servaddr, size_of(type_of(servaddr))) < 0 {
-      print("error: failed to set address to sockfd\n");
+      log_err("error: failed to set address to sockfd\n");
       assert(false); // this can never fail
   }
 
-  assert(false, "unimplemented!");
-  return .{  };
+  set_blocking(xx sockfd);
+
+  return .{ addr = ip, port = port, };
 }
 
-udp_write :: (from: Socket, to: SocketAddress, data: []u8) -> s64 {
+udp_write :: (from: Socket, to: Socket_Address, data: []u8) -> s64 {
   dest_addr := sockaddr_in.{
     sin_addr.s_addr = xx to.addr.ip_addr,
-    sin_port = htons(to.port),
+    sin_port = to.port,
     sin_family = AF_INET,
   };
   addrlen: socklen_t = size_of(sockaddr_in);
   how_much := sendto(xx from, data.data, xx data.count, 0, cast(*sockaddr)*dest_addr, addrlen);
-  if how_much <= 0 print("failed to send data to socket %\n", errno());
+  if how_much <= 0 log_err("failed to send data to socket %\n", errno());
   assert(how_much == data.count); // we  don't give a shit
 
   return how_much;
 }
-udp_recv_from :: (socket: s32, buf: *[]u8) -> (s64, SocketAddress) {
+
+// @unused
+udp_recv_from :: (socket: s32, buf: *[]u8) -> ([]u8, OS_Error_Code, Socket_Address) {
+  assert(false);
   addr: sockaddr_in;
   len: u32 = size_of(sockaddr_in);
 
   sz := recvfrom(socket, buf.data, xx buf.count, xx 0,cast(*sockaddr)*addr, *len);
-  print("read % byes from udp!\n",sz);
-  assert(sz > 0);
+  if sz == -1 || sz == 0 return "", errno(), .{};
 
-  sock_addr := SocketAddress.{
-    addr = IpAddress.{addr.sin_addr.s_addr},
-    port = addr.sin_port,
-  };
+  log_debug("read % byes from udp!\n",sz);
 
-  return sz, sock_addr;
+  // @priority look into the byte order, i don't think we should ntohs port here
+  sock_addr := Socket_Address.{ Ip_Address.{addr.sin_addr.s_addr}, ntohs(addr.sin_port) };
+
+  return array_view(buf, 0, sz), 0, sock_addr;
 }
 
-#scope_file
 #import "Socket";
-#import "Basic";
 #import "POSIX";
+
+#scope_file
+#import "Basic";
+#import "Log";
