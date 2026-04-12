@@ -1,8 +1,4 @@
 // stolen from tsoding https://gist.github.com/rexim/ab45940928399bbda212185b4a6a6339
-#import "Basic";
-#import "Socket";
-#import "POSIX";
-
 libssl :: #system_library "libssl";
 libcrypto :: #system_library "libcrypto";
 
@@ -30,7 +26,18 @@ SSL_read :: (ssl: *SSL, buf: *void, num: s32) -> s32 #foreign libssl;
 SSL_get_error :: (ssl: *SSL, ret: s32) -> s32 #foreign libssl;
 ERR_error_string :: (ret: s32, buf: *u8) -> *u8 #foreign libssl;
 RAND_bytes :: (buf: *u8, num: s32) -> s32 #foreign libcrypto;
+EVP_MD :: void;
+HMAC :: (evp_md: *EVP_MD, key: *u8, key_len: s32, data: *u8, data_len: u64,
+                    md: *u8, md_len: *u32) -> *u8 #foreign libssl;
+EVP_sha1 :: () -> *EVP_MD #foreign libssl;
 
+
+hmac_sha1 :: (key: string, msg: string) -> string {
+  digest: string;
+  digest.data = xx HMAC(EVP_sha1(), key.data, xx key.count, msg.data, xx msg.count, null, null);
+  digest.count = 20;
+  return digest;
+}
 SSL_error_string :: inline (ret: s32) -> string {
   return to_string(ERR_error_string());
 }
@@ -45,3 +52,8 @@ SSL_load_error_strings :: inline () -> s32 {
     return OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS
                             | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, null);
 }
+
+#scope_file
+#import "Basic";
+#import "Socket";
+#import "POSIX";
