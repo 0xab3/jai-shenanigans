@@ -325,16 +325,6 @@ get_random_string :: (len: u64) -> string #expand {
   return base64_encoded;
 }
 
-random_bytes :: (bytes: *[]u8) #expand {
-  n_words := bytes.count / 8;
-  remaining := bytes.count % 8;
-  for 0..n_words-1 {
-    (cast(*u64)bytes.data + it).* = random_get();
-  }
-  for 1..remaining {
-    bytes.data + bytes.count - it = cast(u8)random_get(); // we are going reverse but who cares
-  }
-}
 
 #scope_file
 #import "Stun";

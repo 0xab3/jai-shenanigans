@@ -199,7 +199,13 @@ on_io_udp_read :: (pc: *Peer_Connection(*IO_Uring), read_ctx: *IO_UDP_Read(*IO_U
   }else if 19 < buf[0] && buf[0] < 64 { // dtls
     print("got dtls packet less gooo!\n");
     msg := dtls_message_deserialize(buf);
-    print("%", dtls_message_to_string(*msg));
+    dtls_ctx_ := DTLS_Context.{}; // this shit is statefull but idk what state it has right now
+    verify := dtls_message_hello_verify(*dtls_ctx_, msg, dtls_generate_cookie());
+    serialized := dtls_message_serialize(*verify);
+    sz := udp_write(read_ctx.sock_conn.sock, from, xx serialized);
+
+    assert(sz == serialized.count , tprint("udp write returned %: %\n", sz, to_string(hstrerror(errno()))));
+
   }else if buf[0] < 2 { // stun
     msg := stun_message_serialize(buf);
     as_sane := stun_header_kind_sane(msg);
