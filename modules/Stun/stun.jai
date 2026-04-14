@@ -118,7 +118,7 @@ stun_header_kind_sane :: (header: *Stun_Header) -> Stun_Message_Kind_Sane {
 }
 
 // @todo use Bytes_Reader here
-stun_message_serialize :: (res: []u8) -> Stun_Message {
+stun_message_deserialize :: (res: []u8) -> Stun_Message {
   assert(res.count >= 20, tprint("stun message should atleast be 20 bytes, given % bytes!", res.count));
   parsed_message: Stun_Message;
   res_header := cast(*Stun_Header)res.data;
@@ -235,7 +235,7 @@ stun_message_serialize :: (res: []u8) -> Stun_Message {
   return parsed_message;
 }
 
-stun_message_deserialize :: (msg: *Stun_Message) -> string {
+stun_message_serialize :: (msg: *Stun_Message) -> string {
   total_length := msg.header.length + size_of(Stun_Header);
   deserialized := alloc_string(total_length);
   writer:= Bytes_Writer.{
@@ -395,7 +395,7 @@ stun_message_prepare :: (kind: Stun_Message_Kind, attributes: ..Stun_Attribute) 
 }
 
 stun_message_send :: (msg: *Stun_Message, from: Socket, to: Socket_Address) -> s64 {
-  deser := stun_message_deserialize(msg);
+  deser := stun_message_serialize(msg);
   return udp_write(from, to, xx deser);
 }
 

@@ -134,7 +134,7 @@ handle_stun_success_response :: (pc: *Peer_Connection, msg: Stun_Message, from: 
   // sz = stun_message_send(host.socket, candidate_sock, *msg_another_one);
 }
 on_udp_packet :: (pc: *Peer_Connection, from: Socket_Address, packet: []u8) {
-  msg := stun_message_serialize(packet);
+  msg := stun_message_deserialize(packet);
   sane := stun_header_kind_sane(msg);
   assert(msg.kind & xx Stun_Message_Kind.BIND != 0, tprint("unknown kind %", msg.kind));
   // if sane == {
@@ -207,7 +207,7 @@ on_io_udp_read :: (pc: *Peer_Connection(*IO_Uring), read_ctx: *IO_UDP_Read(*IO_U
     assert(sz == serialized.count , tprint("udp write returned %: %\n", sz, to_string(hstrerror(errno()))));
 
   }else if buf[0] < 2 { // stun
-    msg := stun_message_serialize(buf);
+    msg := stun_message_deserialize(buf);
     as_sane := stun_header_kind_sane(msg);
     if as_sane == {
       case .REQUEST; {
