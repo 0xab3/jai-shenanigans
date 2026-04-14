@@ -1,6 +1,6 @@
 ANSWER_DC_ONLY :: "v=0\r\no=- 2508192892581753534 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:MuJd\r\na=ice-pwd:M7tLfiCRCC7WR8iTB+kEpoKD\r\na=ice-options:trickle\r\na=fingerprint:sha-256 F2:A0:D4:5D:E5:E2:47:BE:02:B4:F2:A8:CE:AD:6F:5E:64:45:EA:9D:21:34:2E:3C:63:C9:6D:F0:3A:CA:1B:5E\r\na=setup:active\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n";
 ANSWER_AS_JSON_DC_ONLY :: #string END_ANSWER
-{"sdp":"v=0\r\no=- 2508192892581753534 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:MuJd\r\na=ice-pwd:M7tLfiCRCC7WR8iTB+kEpoKD\r\na=ice-options:trickle\r\na=fingerprint:sha-256 F2:A0:D4:5D:E5:E2:47:BE:02:B4:F2:A8:CE:AD:6F:5E:64:45:EA:9D:21:34:2E:3C:63:C9:6D:F0:3A:CA:1B:5E\r\na=setup:active\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n","type":"answer"}
+{"sdp":"v=0\r\no=- 2508192892581753534 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:MuJd\r\na=ice-pwd:M7tLfiCRCC7WR8iTB+kEpoKD\r\na=ice-options:trickle\r\na=fingerprint:sha-256 F2:A0:D4:5D:E5:E2:47:BE:02:B4:F2:A8:CE:AD:6F:5E:64:45:EA:9D:21:34:2E:3C:63:C9:6D:F0:3A:CA:1B:5E\r\na=setup:passive\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n","type":"answer"}
 END_ANSWER
 
 Session_Level_Section :: struct {
@@ -88,7 +88,7 @@ parse_sdp :: (sdp_as_str: string) -> Session_Description, SDP_Parse_Error {
 
         if !found {
           if equal(value, "sendrecv") md.send_recv = true;
-          else assert(false, tprint("unknown attribute % with no value\n", attrib_value));
+          else assert(false, tprint("unknown attribute % with no value\n", attrib_name));
         }
 
         if equal(attrib_name, "setup") md.setup = attrib_value;

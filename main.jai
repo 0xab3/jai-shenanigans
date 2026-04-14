@@ -1,21 +1,22 @@
 #import "Basic";
 #import "Compiler";
-Hash_Table :: #import "Hash_Table";
+#import "DTLS";
 #import "File";
+#import "ICE";
 #import "IO";
 #import "LibAV";
 #import "Log";
 #import "Net";
 #import "OpenSSL";
 #import "POSIX";
-#import "Socket";
-#import "String";
-#import "ICE";
 #import "PeerConnection";
 #import "Rtp";
 #import "Sdp";
+#import "Socket";
+#import "String";
 #import "Stun";
 #import "jaison";
+Hash_Table :: #import "Hash_Table";
 
 IO_OP_Kind :: struct {
   type: Type;
@@ -170,7 +171,7 @@ do_connectivity_check_for_pair :: (pc: *Peer_Connection(*IO_Uring)) {
     // @todo @proirity the tie breaker is hardcoded and we do not compute priority
     msg := stun_message_prepare(.BIND,
       stun_attribute_username(it.local.ufrag, it.remote.ufrag),
-      stun_attribute_ice_controlled(0xbaface7fad843c7b), 
+      stun_attribute_ice_controlled(0xbaface7fad843c7b),
       stun_attribute_priority(0x7effffff),
       stun_attribute_integrity(pwd),
       stun_attribute_fingerprint(),
@@ -193,21 +194,31 @@ do_connectivity_check_for_pair :: (pc: *Peer_Connection(*IO_Uring)) {
 }
 
 on_io_udp_read :: (pc: *Peer_Connection(*IO_Uring), read_ctx: *IO_UDP_Read(*IO_Uring), from: Socket_Address, buf: []u8) {
-  msg := stun_message_serialize(buf);
-  as_sane := stun_header_kind_sane(msg);
-  if as_sane == {
-    case .REQUEST; {
-      // from is a peer reflexive address
-      response := stun_message_prepare_binding_response(from, get_local_ice_pwd(pc), msg.transaction_id);
+  // https://datatracker.ietf.org/doc/html/rfc5764#section-5.1.2
+  if 127 < buf[0] && buf[0] < 192 { // rtp
+  }else if 19 < buf[0] && buf[0] < 64 { // dtls
+    print("got dtls packet less gooo!\n");
+    msg := dtls_message_deserialize(buf);
+    print("%", dtls_message_to_string(*msg));
+  }else if buf[0] < 2 { // stun
+    msg := stun_message_serialize(buf);
+    as_sane := stun_header_kind_sane(msg);
+    if as_sane == {
+      case .REQUEST; {
+        // from is a peer reflexive address
+        response := stun_message_prepare_binding_response(from, get_local_ice_pwd(pc), msg.transaction_id);
 
-      assert(read_ctx.sock_conn.sock > 2);
-      stun_message_send(*response, read_ctx.sock_conn.sock, from);
+        assert(read_ctx.sock_conn.sock > 2);
+        stun_message_send(*response, read_ctx.sock_conn.sock, from);
+      }
+      case .INDICATION; assert(false, "INDICATION unimplemented!");
+      case .SUCCESS_RESPONSE; {
+        // @todo we need to handle this to implement failing of ice connection
+      }
+      case .ERROR_RESPONSE; assert(false, "unimplemented!");
     }
-    case .INDICATION; assert(false, "INDICATION unimplemented!");
-    case .SUCCESS_RESPONSE; {
-      // @todo we need to handle this to implement failing of ice connection
-    } 
-    case .ERROR_RESPONSE; assert(false, "unimplemented!");
+  } else {
+    assert(false, "unreachable");
   }
 }
 
@@ -220,10 +231,42 @@ get :: (json_val: JSON_Value, key: string, expected_type: JSON_Type) -> JSON_Val
   return val, success;
 }
 
+new_io_stdin_read_event :: (uring: *IO_Uring) -> *IO_Uring_SQE {
+  // @perf
+  file_read_op := New(IO_File_Read);
+  file_read_op.* = .{
+    type = IO_File_Read,
+    from = .{},
+    buf = xx alloc_string(4096 + 2048),
+  };
+  sqe := uring_op_read(uring, STDIN_FILENO, file_read_op.buf, xx file_read_op); assert(sqe != null);
+  assert(sqe != null);
+  return sqe;
+}
+
+new_io_timeout_event :: (uring: *IO_Uring, timeout: Time_Spec, pc: *Peer_Connection($T)) -> *IO_Uring_SQE {
+  // @perf not really but do not do malloc here
+  timespec := New(Time_Spec);
+  timespec.* = timeout;
+
+  io_timeout_op := New(IO_Timeout(type_of(pc.udata)));
+  io_timeout_op.* = .{
+    type = IO_Timeout(type_of(pc.udata)),
+    pc = pc,
+    timeout = timespec,
+  };
+
+  sqe := uring_op_timeout(uring, timespec, io_timeout_op);
+  assert(sqe != null);
+  return sqe;
+}
+
+
 on_ice_candidate_cb :: (pc: *Peer_Connection(*IO_Uring), candidate: *Ice_Candidate, udata: **IO_Uring) {
-  sb: String_Builder = .{ allocator = temporary_allocator };
-  as_str := to_chrome_ice_candidate_shit(*sb, candidate);
+  sb: String_Builder;
+  as_str := to_chrome_ice_candidate_shit(*sb, candidate,, allocator = temp);
   print("%\n",as_str);
+
   buf := cast([]u8) alloc_string(MTU);
   hdr := create_msghdr(buf);
   on_io_udata := New(IO_UDP_Read(*IO_Uring));
@@ -239,7 +282,6 @@ on_ice_candidate_cb :: (pc: *Peer_Connection(*IO_Uring), candidate: *Ice_Candida
   sqe := uring_op_recvmsg(udata.*, candidate.socket_connection.sock, hdr, 0, xx on_io_udata);
   assert(sqe != null);
 }
-
 
 main :: () {
   params: IO_Uring_Params;
@@ -261,30 +303,9 @@ main :: () {
   // this should be internal to peerconnection after we have set the local description
   gather_local_candidates(*pc);
 
-  // @leak
-  file_read_op := New(IO_File_Read);
-  file_read_op.* = .{
-    type = IO_File_Read,
-    from = .{},
-    buf = xx alloc_string(4096 + 2048),
-  };
-  sqe := uring_op_read(uring, STDIN_FILENO, file_read_op.buf, xx file_read_op); assert(sqe != null);
-  assert(sqe != null);
+  new_io_stdin_read_event(uring);
+  new_io_timeout_event(uring, Time_Spec.{1,0}, *pc);
 
-  // @perf not really but do not do malloc here
-  timeout := New(Time_Spec);
-  timeout.tv_sec = 1;
-  timeout.tv_nsec = 0;
-
-  io_timeout_op := New(IO_Timeout(*IO_Uring));
-  io_timeout_op.* = .{
-    type = IO_Timeout(*IO_Uring),
-    pc = *pc,
-    timeout = timeout,
-  };
-
-  sqe = uring_op_timeout(uring, timeout, io_timeout_op);
-  assert(sqe != null);
 
   cqes_original: [5] IO_Uring_CQE;
   cqes := array_view(cqes_original, 0, 5);
@@ -298,7 +319,6 @@ main :: () {
     }
 
     for copied {
-      // here we should remove the event from the peer connection or something like that
       udata := it.user_data;
       kind := cast(*IO_OP_Kind)udata;
       if kind.type == {
@@ -324,7 +344,7 @@ main :: () {
           // @todo @priority this is ass as we just use scope variables like pc and all without
           // taking it from IO_File_Read
           if it.res < 0 {
-            print("File Closed!\n"); assert(false);
+            log_err("File Closed!\n"); assert(false);
             continue;
           }
           file_read := cast(*IO_File_Read) kind;
@@ -339,7 +359,7 @@ main :: () {
             parsed_sdp := parse_sdp(sdp.str);
             set_remote_description(*pc, parsed_sdp);
           }else {
-            candidate_jvalue, ok := get(root, "candidate", .STRING); 
+            candidate_jvalue, ok := get(root, "candidate", .STRING);
             if !ok continue;
             // @leak
             candidate_str := copy_string(candidate_jvalue.str);
@@ -348,7 +368,7 @@ main :: () {
             // figure out all the bs with the component id shit bru
             assert(pc.check_list.pairs.count != 0);
           }
-          sqe := uring_op_read(uring, STDIN_FILENO, file_read.buf, xx file_read_op);
+          sqe := uring_op_read(uring, STDIN_FILENO, file_read.buf, xx file_read);
           assert(sqe != null);
 
         case IO_Timeout(*IO_Uring);
@@ -358,101 +378,10 @@ main :: () {
           do_connectivity_check_for_pair(as_timeout.pc);
 
           // we can have a multishoot timeout but nah cause kernel>6.4 and we will have to do cancellations
-          sqe = uring_op_timeout(as_timeout.pc.udata, as_timeout.timeout, as_timeout);
+          sqe := uring_op_timeout(as_timeout.pc.udata, as_timeout.timeout, as_timeout);
           assert(sqe != null);
       };
+      reset_temporary_storage();
     }
   }
-  // builder: String_Builder;
-  // sz: s64;
-  //
-  // // only for single candidate
-  // io_add_event(io, xx host.socket, .READ, xx *host_candidates[0]);
-  //
-  // while true {
-  //   events:= io_tick();
-  //   for events {
-  //
-  //   if it.events & xx Event_Kind.IN  != 0 {
-  //     buffer: [MTU]u8;
-  //     while true {
-  //       bytes, err, addr := udp_recv_from();
-  //       if (err & (EWOULDBLOCK | EAGAIN)) != 0 break;
-  //       if bytes.count == 0 {
-  //         // we read zero bytes meaning the connection is closed do smth here
-  //         assert(false);
-  //       }
-  //       on_udp_packet(xx it.data.ptr, addr, bytes);
-  //     }
-  //   }
-  //   if it.events & xx Event_Kind.OUT != 0 {
-  //     assert(false, "unreachable"); // for now
-  //   }
-  //   if it.events & EPOLLERR != 0 {
-  //     error: s32 = 0;
-  //     errlen: s32 = size_of(s32);
-  //     assert(it.data.fd > 2);
-  //     ret := getsockopt(it.data.fd, SOL_SOCKET, SO_ERROR, xx *error, *errlen); assert(ret == 0);
-  //     // add better logging
-  //     log_error("error occured on socket fd %: %s\n", to_string(hstrerror(error)));
-  //   }
-  //   if it.events & EPOLLRDHUP  != 0 { log_info("socket fd % is closed\n"); }
-  //   }
-  // }
-
-
-
-  // first shit
-  // sz, sock_info = udp_recv_from(xx host.socket, *cast([]u8)slice);
-  // first_msg := stun_message_serialize(array_view(cast([]u8) slice, 0, sz));
-  //
-  // ok:, usrname_attr := stun_message_try_get_attribute(first_msg, Stun_Attribute_Username);
-  //
-  // print("sock_info.port %\n",sock_info.port);
-  // reply := stun_message_prepare(.BIND |.SUCCESS_RESPONSE,
-  //   // fix this
-  //   stun_attribute_xor_mapped(sock_info),
-  //   stun_attribute_integrity(UPWD),
-  // );
-  // reply.header.transaction_id = first_msg.header.transaction_id;
-  // sz = stun_message_send(host.socket, sock_info, *reply);
-
-  // pwd := readline();
-  // line := readline();
-  //
-  // candidate := parse_ice_candidate_string(line);
-  // assert(candidate.ufrag.count != 0);
-  //
-  // msg_another_one := stun_message_prepare(.BIND,
-  //   stun_attribute_username(UFRAG, candidate.ufrag),
-  //   stun_attribute_ice_controlled(0xbaface7fad843c7b),
-  //   stun_attribute_priority(0x7effffff),
-  //   stun_attribute_integrity(pwd),
-  //   stun_attribute_fingerprint(),
-  // );
-  // candidate_sock: SocketAddress = .{
-  //   ip_addr_from_string(candidate.connection_addr),
-  //   candidate.port,
-  // };
-  //
-  // print("sent to %:%\n",to_string(candidate_sock.addr), candidate.port);
-  //
-  // sz = stun_message_send(host.socket, candidate_sock, *msg_another_one);
-  // assert(sz != -1);
-  // print("sent the message and shit or smth\n");
-  //
-  // sz, sock_info = udp_recv_from(xx host.socket, *cast([]u8)slice);
-  // msg := stun_message_serialize(array_view(cast([]u8) slice, 0, sz));
-  // msg_as_str := to_string(*builder, msg);
-  // print("got reply to our request now i guess\n");
-  // print(msg_as_str);
-  // while true {};
-}
-
-// i can't belive i have to write this
-readline :: () -> string {
-  buffer := alloc_string(1024);
-  bytes_read := read(STDIN_FILENO, buffer.data, cast(u64) buffer.count);
-  if bytes_read > 0 buffer.count = bytes_read;
-  return trim(buffer);
 }

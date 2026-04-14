@@ -82,7 +82,8 @@ get_local_ice_pwd :: (pc: Peer_Connection($T)) -> string {
 gather_local_candidates :: (pc: *Peer_Connection($T)) {
   // @todo this should only be triggered when we add a new componenet
   candidates: [..]Ice_Candidate;
-  host_candidates := get_host_candidates(*candidates,, allocator = temp);
+  candidates.allocator = temp;
+  host_candidates := get_host_candidates(*candidates);
   // NOTE: @important srflx/relay candidates will do a read call from network that is bloacking
   // figure out the architecture for that, we can put the request in io_uring, on response we can
   // parse the response and have a reference to peer connection in it

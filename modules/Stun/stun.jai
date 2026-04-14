@@ -21,11 +21,6 @@ Stun_Message_Kind :: enum_flags u16 {
 
 };
 
-Pair :: struct (T: Type, T2: Type) {
-  first: T;
-  second: T2;
-} #no_padding;
-
 Stun_Header :: struct {
   kind: u16;
   length:  u16;
@@ -122,7 +117,7 @@ stun_header_kind_sane :: (header: *Stun_Header) -> Stun_Message_Kind_Sane {
   return xx _sane;
 }
 
-
+// @todo use Bytes_Reader here
 stun_message_serialize :: (res: []u8) -> Stun_Message {
   assert(res.count >= 20, tprint("stun message should atleast be 20 bytes, given % bytes!", res.count));
   parsed_message: Stun_Message;
@@ -130,10 +125,12 @@ stun_message_serialize :: (res: []u8) -> Stun_Message {
 
   kind := stun_header_kind_sane(res_header);
 
+  assert(BYTE_SWAP(res_header.kind) & xx Stun_Message_Kind.BIND != 0);
+
   if kind == {
     case .REQUEST;{}
     case .INDICATION; assert(false, "INDICATION is not implemented!");
-    case .SUCCESS_RESPONSE; assert(BYTE_SWAP(res_header.kind) & xx Stun_Message_Kind.BIND != 0);
+    case .SUCCESS_RESPONSE; {};
     case .ERROR_RESPONSE; assert(false, "ERROR_RESPONSE is not implemented!");
   }
   // TODO(shahzad): we do not parse method and assume that the server will only send the bind one
@@ -236,21 +233,6 @@ stun_message_serialize :: (res: []u8) -> Stun_Message {
   }
   assert(bytes_consumed_while_parsing_attrs <= parsed_message.header.length);
   return parsed_message;
-}
-
-Bytes_Writer :: struct {
-  cursor: s64;
-  bytes: []u8;
-};
-
-write_bytes :: (using writer: *Bytes_Writer, data: $T) {
-  (bytes.data + cursor).(*T).* = data;
-  cursor += size_of(T);
-}
-
-write_string :: (using writer: *Bytes_Writer, str: string) {
-  memcpy(bytes.data + cursor, str.data, str.count);
-  cursor += str.count;
 }
 
 stun_message_deserialize :: (msg: *Stun_Message) -> string {
@@ -615,16 +597,6 @@ to_string :: (builder: *String_Builder, message: Stun_Message) -> string #expand
     return builder_to_string(builder);
 }
 
-
-big_endian :: () -> bool #expand {
-  x: u16 = 1;
-  y := cast(*u8)*x;
-  if y[0] return false;
-  return true;
-}
-#if #run !big_endian() BYTE_SWAP :: byte_swap; else BYTE_SWAP ::  (input: $T) -> T { return input; };
-
-
 #scope_file
 
 #import "Basic";
@@ -637,3 +609,4 @@ big_endian :: () -> bool #expand {
 #import "Socket";
 #import "String";
 #import "Tagged_Union";
+#import "utils";
