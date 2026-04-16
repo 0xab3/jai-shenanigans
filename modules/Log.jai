@@ -3,6 +3,7 @@ log_debug :: (format_string: string, args: .. Any, loc := #caller_location, flag
 } @PrintLike
 log_err  :: log_error;
 log_info :: log;
+log_warn :: log;
 
 #scope_file
 #import "Basic";

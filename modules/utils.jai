@@ -88,15 +88,25 @@ bytes_to_int :: (buf: [$N]u8, $T: Type) -> T {
   return res;
 }
 
+random_n_bytes :: ($N: s64) -> [N]u8 {
+  bytes: [N]u8;
+  random_bytes(*array_view(bytes, 0, N));
+  return bytes;
+}
 random_bytes :: (bytes: *[]u8) #expand {
+  assert(bytes.count != 0);
   n_words := bytes.count / 8;
   remaining := bytes.count % 8;
   for 0..n_words-1 {
     (cast(*u64)bytes.data + it).* = random_get();
   }
   for 1..remaining {
-    (bytes.data + bytes.count - it).* = cast(u8)random_get(); // we are going reverse but who cares
+    (bytes.data + bytes.count - it).* = cast,no_check(u8)random_get(); // we are going reverse but who cares
   }
+}
+
+strerror :: (err: OS_Error_Code) -> string {
+  return to_string(hstrerror(err));
 }
 
 formatHex :: #bake_arguments formatInt(base=16);
@@ -111,6 +121,10 @@ big_endian :: () -> bool #expand {
 // options in bytes_reader
 #if #run !big_endian() BYTE_SWAP :: byte_swap; else BYTE_SWAP ::  (input: $T) -> T { return input; };
 
+#scope_file
 #import "Basic";
 #import "Bit_Operations";
 #import "Random";
+#import "POSIX";
+#import "Linux";
+#import "Socket";

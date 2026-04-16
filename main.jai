@@ -1,4 +1,6 @@
 #import "Basic";
+#import "SRTP";
+#import "utils";
 #import "Compiler";
 #import "DTLS";
 #import "File";
@@ -197,16 +199,32 @@ on_io_udp_read :: (pc: *Peer_Connection(*IO_Uring), read_ctx: *IO_UDP_Read(*IO_U
   // https://datatracker.ietf.org/doc/html/rfc5764#section-5.1.2
   if 127 < buf[0] && buf[0] < 192 { // rtp
   }else if 19 < buf[0] && buf[0] < 64 { // dtls
+    dtls_ctx := *pc.dtls_ctx;
     print("got dtls packet less gooo!\n");
     msg := dtls_message_deserialize(buf);
-    dtls_ctx_ := DTLS_Context.{}; // this shit is statefull but idk what state it has right now
-    verify := dtls_message_hello_verify(*dtls_ctx_, msg, dtls_generate_cookie());
-    serialized := dtls_message_serialize(*verify);
-    sz := udp_write(read_ctx.sock_conn.sock, from, xx serialized);
+    ok := dtls_message_get_cookie(msg);
+    if !ok {
+      verify := dtls_message_hello_verify(dtls_ctx, msg, dtls_generate_cookie());
+      serialized := dtls_message_serialize(*verify);
+      sz := udp_write(read_ctx.sock_conn.sock, from, xx serialized);
+      assert(sz == serialized.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
+      return;
+    }
+    if msg.header.kind == .CLIENT_HELLO {
+      srtp_ext := srtp_get_extensions(.AES128_CM_HMAC_SHA1_80, mki = .[]);
+      reply := dtls_message_server_hello(dtls_ctx, msg, .[srtp_ext]);
+      serialized := dtls_message_serialize(*reply);
+      sz := udp_write(read_ctx.sock_conn.sock, from, xx serialized);
+      assert(sz == serialized.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
 
-    assert(sz == serialized.count , tprint("udp write returned %: %\n", sz, to_string(hstrerror(errno()))));
+      reply = dtls_message_server_hello_done(dtls_ctx);
+      serialized = dtls_message_serialize(*reply);
+      sz = udp_write(read_ctx.sock_conn.sock, from, xx serialized);
+      assert(sz == serialized.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
 
+    }
   }else if buf[0] < 2 { // stun
+    dtls_ctx := *pc.dtls_ctx;
     msg := stun_message_deserialize(buf);
     as_sane := stun_header_kind_sane(msg);
     if as_sane == {
@@ -219,6 +237,18 @@ on_io_udp_read :: (pc: *Peer_Connection(*IO_Uring), read_ctx: *IO_UDP_Read(*IO_U
       }
       case .INDICATION; assert(false, "INDICATION unimplemented!");
       case .SUCCESS_RESPONSE; {
+        val, ok := Hash_Table.table_find(*pc.check_list.tid_lut, msg.transaction_id);
+        if !ok {
+          id := msg.transaction_id;
+          log_err("failed to get ice pair for t_id %_%\n", id.first, id.second);
+          assert(false);
+        }
+        val.is_connected = true;
+
+        // dtls_hello := dtls_client_hello();
+        // serialized := dtls_message_serialize();
+        // sz := udp_write(read_ctx.sock_conn.sock, from, xx serialized);
+        // assert(sz == serialized.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
         // @todo we need to handle this to implement failing of ice connection
       }
       case .ERROR_RESPONSE; assert(false, "unimplemented!");
@@ -266,7 +296,6 @@ new_io_timeout_event :: (uring: *IO_Uring, timeout: Time_Spec, pc: *Peer_Connect
   assert(sqe != null);
   return sqe;
 }
-
 
 on_ice_candidate_cb :: (pc: *Peer_Connection(*IO_Uring), candidate: *Ice_Candidate, udata: **IO_Uring) {
   sb: String_Builder;
@@ -334,7 +363,7 @@ main :: () {
         // we can't cast from a runtime type
         case IO_UDP_Read(*IO_Uring);
           if it.res <= 0 {
-            print("error occured while reading from the socket %\n",to_string(hstrerror(errno())));
+            print("error occured while reading from the socket %\n",strerror(errno()));
             continue;
           };
           udp_read := cast(*IO_UDP_Read(*IO_Uring)) kind;

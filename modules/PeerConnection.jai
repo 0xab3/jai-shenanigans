@@ -9,6 +9,7 @@ Peer_Connection :: struct (T: Type) {
   remote_description: Session_Description;
   on_ice_candidate: On_Ice_Candidate;
   storage: Temporary_Storage;
+  dtls_ctx: DTLS_Context;
   udata: T;
 };
 
@@ -41,7 +42,7 @@ add_ice_candidate :: (pc: *Peer_Connection($T), candidate: Ice_Candidate) {
   remote := *pc.remote_candidates.data[pc.remote_candidates.count - 1];
 
   for * pc.local_candidates {
-    if can_pair(it, remote) check_list_add(*pc.check_list, .{ it, remote });
+    if can_pair(it, remote) check_list_add(*pc.check_list, .{ it, remote, false });
   }
 }
 new_peer_connection :: (config: Peer_Configuration, udata: $T) -> Peer_Connection(T) {
@@ -96,3 +97,4 @@ gather_local_candidates :: (pc: *Peer_Connection($T)) {
 #import "ICE";
 #import "Basic";
 #import "Sdp";
+#import "DTLS";
