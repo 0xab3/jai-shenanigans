@@ -14,19 +14,35 @@ STUN_HEADER_TYPE_BIT_C1 :: 1 << 8;
 Stun_Message_Kind :: enum_flags u16 {
   REQUEST                       ::  0x0;
   INDICATION                    ::  STUN_HEADER_TYPE_BIT_C0;
-  SUCCESS_RESPONSE               ::  STUN_HEADER_TYPE_BIT_C1;
+  SUCCESS_RESPONSE              ::  STUN_HEADER_TYPE_BIT_C1;
   ERROR_RESPONSE                ::  STUN_HEADER_TYPE_BIT_C0 | STUN_HEADER_TYPE_BIT_C1;
-
   BIND                          ::  0x1;
 
 };
+
+Stun_Transaction_Id :: Pair(u64, u32);
+
+operator == :: (x: Stun_Transaction_Id, y: Stun_Transaction_Id) -> bool {
+  return (x.first == y.first) && (x.second == y.second);
+}
+
+transaction_id_eq :: (x: Stun_Transaction_Id, y: Stun_Transaction_Id) -> bool {
+  return x == y;
+}
+transaction_id_hash :: (x: Stun_Transaction_Id) -> u32 {
+  as_str: string;
+  as_str.data = cast(*u8)*x.first;
+  as_str.count = size_of(Stun_Transaction_Id);
+  return get_hash(as_str);
+}
 
 Stun_Header :: struct {
   kind: u16;
   length:  u16;
   magic_cookie: u32;
-  transaction_id: Pair(u64, u32);
+  transaction_id: Stun_Transaction_Id;
 } #no_padding;
+
 #assert size_of(Stun_Header) == 20;
 
 Stun_Attribute_Kind :: enum u16 {
@@ -143,8 +159,7 @@ stun_message_deserialize :: (res: []u8) -> Stun_Message {
     transaction_id.second = res_header.transaction_id.second, // idk why but we don't have to do swap
   };
 
-  builder: String_Builder;
-  str := to_string(*builder, parsed_message.header);
+  str := to_string(parsed_message.header);
   assert(parsed_message.header.length & 0b11 == 0); // the value is padded to be multiple of 4 bytes
 
   // skip the payload first
@@ -399,7 +414,7 @@ stun_message_send :: (msg: *Stun_Message, from: Socket, to: Socket_Address) -> s
   return udp_write(from, to, xx deser);
 }
 
-stun_message_prepare_binding_response :: (sock_info: Socket_Address, pwd: string, t_id: Pair(u64, u32)) -> Stun_Message #expand {
+stun_message_prepare_binding_response :: (sock_info: Socket_Address, pwd: string, t_id: Stun_Transaction_Id) -> Stun_Message #expand {
   reply := stun_message_prepare(
     .BIND |.SUCCESS_RESPONSE,
     stun_attribute_xor_mapped(sock_info),
@@ -533,24 +548,25 @@ _cryptographically_secure_random_bytes :: ($N: int) -> [N]u8 {
 
 
 // made clacker write the printing code because i ain't spending time doing allat
-to_string :: (builder: *String_Builder, header: Stun_Header) -> string #expand {
-    print_to_builder(builder, "{\n");
-    print_to_builder(builder, "    kind: %,\n", cast(Stun_Message_Kind)header.kind);
-    print_to_builder(builder, "    length: %,\n", header.length);
-    print_to_builder(builder, "    magic_cookie: 0x%,\n", formatInt(header.magic_cookie, base=16));
-    print_to_builder(builder, "    transaction_id: %_%,\n",
-      formatInt(BYTE_SWAP(header.transaction_id.first), base=16),
-      formatInt(BYTE_SWAP(header.transaction_id.second), base=16)
-    );
-    print_to_builder(builder, "  }");
-
-    return builder_to_string(builder);
+to_string :: (header: Stun_Header) -> string #expand {
+  builder := String_Builder.{allocator = temp};
+  print_to_builder(*builder, "{\n");
+  print_to_builder(*builder, "    kind: %,\n", cast(Stun_Message_Kind)header.kind);
+  print_to_builder(*builder, "    length: %,\n", header.length);
+  print_to_builder(*builder, "    magic_cookie: 0x%,\n", formatInt(header.magic_cookie, base=16));
+  print_to_builder(*builder, "    transaction_id: %_%,\n",
+    formatInt(BYTE_SWAP(header.transaction_id.first), base=16),
+    formatInt(BYTE_SWAP(header.transaction_id.second), base=16)
+  );
+  print_to_builder(*builder, "  }");
+  return builder_to_string(*builder);
 }
 
-to_string :: (builder: *String_Builder, message: Stun_Message) -> string #expand {
-    temp_builder: String_Builder;
+to_string :: (message: Stun_Message) -> string #expand {
+    temp_builder := String_Builder.{allocator = temp};
+    builder := *temp_builder;
     print_to_builder(builder, "STUN message {\n");
-    print_to_builder(builder, "  header: %\n", to_string(*temp_builder, message.header));
+    print_to_builder(builder, "  header: %\n", to_string(message.header));
     print_to_builder(builder, "  attributes: [\n");
 
     for attr: message.attributes {
@@ -610,3 +626,5 @@ to_string :: (builder: *String_Builder, message: Stun_Message) -> string #expand
 #import "String";
 #import "Tagged_Union";
 #import "utils";
+#import "Hash_Table";
+#import "Hash";

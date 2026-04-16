@@ -22,6 +22,8 @@ Media_Description :: struct {
 
   // attributes
   send_recv: bool = false;
+  rtcp_mux: bool = false;
+  rtcp_rsize: bool = false; // @todo idk what this means
   setup: string;
   mid: u32;
   sctp_port: u32;
@@ -88,6 +90,8 @@ parse_sdp :: (sdp_as_str: string) -> Session_Description, SDP_Parse_Error {
 
         if !found {
           if equal(value, "sendrecv") md.send_recv = true;
+          else if equal(value, "rtcp-mux") md.rtcp_mux = true;
+          else if equal(value, "rtcp-rsize") md.rtcp_rsize = true;
           else assert(false, tprint("unknown attribute % with no value\n", attrib_name));
         }
 

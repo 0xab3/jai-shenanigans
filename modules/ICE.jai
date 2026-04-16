@@ -24,6 +24,7 @@ Ice_Configuration :: struct {
 Ice_Candidate_Pair :: struct {
   local: *Ice_Candidate;
   remote: *Ice_Candidate;
+  is_connected := false;
 };
 
 Ice_Candidate :: struct {
@@ -63,6 +64,11 @@ Check_List :: struct {
     FAILED;
   }
   pairs: [..]Ice_Candidate_Pair;
+  tid_lut: Table(
+    Stun_Transaction_Id, *Ice_Candidate_Pair,
+    given_compare_function = transaction_id_eq,
+    given_hash_function = transaction_id_hash,
+  );
   state: State = .RUNNING;
 };
 
@@ -312,7 +318,6 @@ get_reflexive_candidates :: (using candidates: []Ice_Candidate) {
 }
 get_relay_candidates :: () {
   assert(false, "unimplemented! we don't support turn for now");
-
 }
 
 get_random_string :: (len: u64) -> string #expand {
