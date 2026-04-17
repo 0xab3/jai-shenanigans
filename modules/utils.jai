@@ -105,6 +105,16 @@ random_bytes :: (bytes: *[]u8) #expand {
   }
 }
 
+unreachable :: (fmt: string, args: ..Any) {
+  builder: String_Builder;
+  print_to_builder(*builder, fmt, ..args,, allocator = temp);
+  msg := builder_to_string(*builder);
+  assert(false, msg);
+}
+unreachable :: (msg: string) {
+  assert(false, msg);
+}
+
 strerror :: (err: OS_Error_Code) -> string {
   return to_string(hstrerror(err));
 }
