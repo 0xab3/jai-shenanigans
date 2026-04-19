@@ -29,6 +29,15 @@ Bytes_Reader :: struct {
   should_swap: bool = true;
 };
 
+read_bytes_inplace :: (using reader: *Bytes_Reader, x: *$T) {
+  assert(cursor - 1 + size_of(T) <= bytes.count,
+    tprint("% % %\n", cursor - 1, size_of(T), bytes.count)
+  );
+  _read: T = (bytes.data + cursor).(*T).*;
+  cursor += size_of(T);
+  if reader.should_swap _read = byte_swap(_read);
+  x.* = _read;
+}
 
 read_bytes :: (using reader: *Bytes_Reader, $T: Type) -> T {
   assert(cursor - 1 + size_of(T) <= bytes.count,
@@ -40,6 +49,49 @@ read_bytes :: (using reader: *Bytes_Reader, $T: Type) -> T {
   return _read;
 }
 
+reflection_array_copy :: (arr: *[]u8, idx: s64, elem: *void, info: *Type_Info) {
+  assert(info.runtime_size > 0);
+  byte_idx := idx * info.runtime_size;
+  maybe_grow(xx arr, info.runtime_size);
+  memcpy(arr.data + byte_idx, elem, info.runtime_size);
+}
+
+reflection_array_add :: (arr: *[]u8, elem: *void, info: *Type_Info) {
+  assert(info.runtime_size > 0);
+  byte_idx := arr.count;
+  maybe_grow(xx arr, info.runtime_size);
+  memcpy(arr.data + byte_idx, elem, info.runtime_size);
+  arr.count += info.runtime_size;
+}
+
+reflection_struct_set_field :: (info: *Type_Info_Struct, name: string, data: *u8, value: *u8) {
+  member := get_field(info, name);
+  if !member unreachable("no member named % in struct %\n",name, info.name);
+  reflection_struct_set_field(member, data, value);
+}
+reflection_struct_set_field :: (member: *Type_Info_Struct_Member, data: *u8, value: *u8) {
+  memcpy(data + member.offset_in_bytes, value, member.offset_in_bytes);
+}
+
+byte_swap_inplace :: (data: *u8, sz: s64) {
+  if sz == {
+    case 1; return;
+    case 2; as_int_ptr := data.(*u16); as_int_ptr.* = byte_swap(as_int_ptr.*);
+    case 4; as_int_ptr := data.(*u32); as_int_ptr.* = byte_swap(as_int_ptr.*); 
+    case 8; as_int_ptr := data.(*u64); as_int_ptr.* = byte_swap(as_int_ptr.*); 
+    case;
+      unreachable("unknown size %\n", sz);
+  }
+}
+
+// this should be named as any as to implies that this converts the type
+// instead this only converts the representation ykwim
+to_any :: (concrete :*$T) -> Any #expand {
+  as_any: Any;
+  as_any.type = type_info(type_of(concrete.*));
+  as_any.value_pointer = concrete;
+  return as_any;
+}
 // ik about polymorphism but we ain't doing that
 read_string_no_copy :: (using reader: *Bytes_Reader, sz: s64) -> []u8 {
   assert(cast(s64)(cursor - 1 + sz) <= bytes.count,
@@ -80,6 +132,19 @@ int_to_bytes :: ($N: s64, data: $T) -> [N]u8 {
   return buf;
 }
 
+pointer_to_view :: (data: *void, count: s64, $T: Type = u8) -> []T {
+  res: T;
+  res.data = xx data;
+  res.count = count;
+  return res;
+}
+bytes_to_int :: (buf: []u8, $T: Type) -> T {
+  res: T;
+  for 0..buf.count-1 {
+    res = (res << 8) | buf[it];
+  }
+  return res;
+}
 bytes_to_int :: (buf: [$N]u8, $T: Type) -> T {
   res: T;
   for 0..buf.count-1 {
@@ -105,13 +170,13 @@ random_bytes :: (bytes: *[]u8) #expand {
   }
 }
 
-unreachable :: (fmt: string, args: ..Any) {
+unreachable :: (fmt: string, args: ..Any) #expand {
   builder: String_Builder;
   print_to_builder(*builder, fmt, ..args,, allocator = temp);
   msg := builder_to_string(*builder);
   assert(false, msg);
 }
-unreachable :: (msg: string) {
+unreachable :: (msg: string) #expand {
   assert(false, msg);
 }
 

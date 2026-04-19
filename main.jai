@@ -15,6 +15,7 @@
 #import "Rtp";
 #import "Sdp";
 #import "Socket";
+#import "Tagged_Union";
 #import "String";
 #import "Stun";
 #import "jaison";
@@ -316,6 +317,11 @@ on_ice_candidate_cb :: (pc: *Peer_Connection(*IO_Uring), candidate: *Ice_Candida
   };
   sqe := uring_op_recvmsg(udata.*, candidate.socket_connection.sock, hdr, 0, xx on_io_udata);
   assert(sqe != null);
+}
+set_pp :: () {
+  context.print_style.default_format_struct.draw_type_name = true;
+  context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = -1;
+  context.print_style.default_format_struct.use_newlines_if_long_form = true;
 }
 
 main :: () {

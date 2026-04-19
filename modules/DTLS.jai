@@ -12,7 +12,6 @@ DTLS_Context :: struct {
   seq_no: Pair(u32, u16);
 };
 
-
 operator + :: (x: Pair(u32, u16), y: s64) -> Pair(u32, u16) {
   as_s64 := cast(s64) x.second;
   // i don't have time to do this
@@ -38,7 +37,7 @@ DTLS_Content_Kind :: enum u8 {
 };
 
 DTLS_Handshake_Kind :: enum u8 {
-  HELLO_REQUEST         ::   00;
+  HELLO_REQUEST         ::   00; @DTLS_Client_Hello
   CLIENT_HELLO          ::   01;
   SERVER_HELLO          ::   02;
   HELLO_VERIFY_REQUEST  ::   03;
@@ -157,251 +156,137 @@ DTLS_Handshake_Message :: struct {
   value: DTLS_Handshake_Value;
 };
 
-to_string :: (record: *DTLS_Record, tab := "") -> string {
-  sb := String_Builder.{
-    allocator = temporary_allocator,
-  };
-  r := record;
-  seq_hi := r.seq_no.first;
-  seq_lo := r.seq_no.second;
-  print_to_builder(*sb, "%DTLS_Record {\n", tab);
-  print_to_builder(*sb, "%  kind: %\n", tab, r.kind);
-  print_to_builder(*sb, "%  version: %.%\n", tab, ~r.version.major, ~r.version.minor);
-  print_to_builder(*sb, "%  epoch: %\n", tab, r.epoch);
-  print_to_builder(*sb, "%  seq_no: (%, %)\n", tab, seq_hi, seq_lo);
-  print_to_builder(*sb, "%  length: %\n", tab, r.length);
-  print_to_builder(*sb, "%}\n", tab);
-  return builder_to_string(*sb);
-}
+_deserialize :: (reader: *Bytes_Reader, x: *Any, size_notes_ommitable := false, caller_loc := #caller_location) {
+  if x.type.(*Type_Info).type != .STRUCT assert(false,"panic!!");
+  x_type := cast(*Type_Info_Struct)x.type; 
 
-to_string :: (hdr: *DTLS_Handshake_Header, tab := "") -> string {
-  sb := String_Builder.{ allocator = temporary_allocator };
-  print_to_builder(*sb, "%DTLS_Handshake_Header {\n", tab);
-  print_to_builder(*sb, "%  kind: %\n", tab, hdr.kind);
-  print_to_builder(*sb, "%  length: %\n", tab, hdr.length);
-  print_to_builder(*sb, "%  message_seq: %\n", tab, hdr.message_seq);
-  print_to_builder(*sb, "%  fragment_offset: %\n", tab, hdr.fragment_offset);
-  print_to_builder(*sb, "%  fragment_length: %\n", tab, hdr.fragment_length);
-  print_to_builder(*sb, "%}\n", tab);
-  return builder_to_string(*sb);
-}
+  for x_type.members {
+    if equal(it.name, "_") continue;
+    notes := it.notes;
 
-to_string :: (value: DTLS_Handshake_Value, tab := "") -> string {
-  as_hello := isa(value, DTLS_Client_Hello);
-  if as_hello != null return to_string(as_hello, tab);
-
-  as_hello_verify := isa(value, DTLS_Hello_Verify);
-  if as_hello_verify != null return to_string(as_hello_verify, tab);
-  assert(false, tprint("type % is not implemented", value.tag));
-  return "";
-}
-
-to_string :: (value: *DTLS_Hello_Verify, tab := "") -> string {
-  sb := String_Builder.{ allocator = temporary_allocator };
-  server_version := value.server_version;
-  print_to_builder(*sb, "%DTLS_Hello_Verify {\n", tab);
-  print_to_builder(*sb, "%  server_version: %.%\n", tab, ~server_version.major, ~server_version.minor);
-  print_to_builder(*sb, "%  cookie: %\n", tab, hex_string(value.cookie));
-  print_to_builder(*sb, "%}\n", tab);
-  return builder_to_string(*sb);
-}
-
-to_string :: (ch: *DTLS_Client_Hello, tab := "") -> string {
-  sb := String_Builder.{ allocator = temporary_allocator };
-  random_bytes_as_hex_string := hex_string(ch.random.random_bytes,, allocator = temp);
-  print_to_builder(*sb, "%DTLS_Client_Hello {\n", tab);
-  print_to_builder(*sb, "%  client_version: %.%\n", tab, ~ch.client_version.major, ~ch.client_version.minor);
-  print_to_builder(*sb, "%  random: %_%\n", tab, formatHex(ch.random.gmt_unix_time), random_bytes_as_hex_string);
-  print_to_builder(*sb, "%  session_id: [", tab);
-  for 0..ch.session_id.count-1 {
-    print_to_builder(*sb, "%", ch.session_id[it]);
-    if it < ch.session_id.count - 1 print_to_builder(*sb, ", ");
-  }
-  print_to_builder(*sb, "]\n");
-
-  print_to_builder(*sb, "%  cookie: [", tab);
-  for 0..ch.cookie.count-1 {
-    print_to_builder(*sb, "%", ch.cookie[it]);
-    if it < ch.cookie.count - 1 print_to_builder(*sb, ", ");
-  }
-  print_to_builder(*sb, "]\n");
-
-  suites := ch.cipher_suites;
-  print_to_builder(*sb, "%  cipher_suites: [\n", tab);
-  for 0..suites.count-1 print_to_builder(*sb, "%    [%,%]\n", tab, formatHex(suites[it][0]), formatHex(suites[it][1]));
-  print_to_builder(*sb, "%  ]\n", tab);
-
-  print_to_builder(*sb, "%  compression_methods: [\n", tab);
-  for 0..ch.compression_methods.count-1 print_to_builder(*sb, "%    %\n", tab, ch.compression_methods[it]);
-  print_to_builder(*sb, "%  ]\n", tab);
-  print_to_builder(*sb, "%}\n", tab);
-  return builder_to_string(*sb);
-}
-
-to_string :: (msg: *DTLS_Handshake_Message) -> string {
-  sb := String_Builder.{ allocator = temporary_allocator };
-  rcd := to_string(*msg.record, "    ");
-  hdr := to_string(*msg.header, "    ");
-  handshake := to_string(*msg.value, "    ");
-  print_to_builder(*sb, "DTLS_Message {\n");
-  print_to_builder(*sb, "%", rcd);
-  print_to_builder(*sb, "%", hdr);
-  print_to_builder(*sb, "%", handshake);
-  print_to_builder(*sb, "}\n");
-  return builder_to_string(*sb);
-}
-
-_dtls_record_deserialize :: (reader: *Bytes_Reader) -> DTLS_Record {
-  kind := read_bytes(reader, u8);
-
-  version_hi := read_bytes(reader, u8);
-  version_lo := read_bytes(reader, u8);
-
-  epoch := read_bytes(reader, u16);
-  seq_no: Pair(u32, u16);
-  seq_no.first = read_bytes(reader, u32);
-  seq_no.second = read_bytes(reader, u16);
-
-  version := DTLS_Protocol_Version.{
-    major = version_hi,
-    minor = version_lo,
-  };
-
-  length := read_bytes(reader, u16);
-  return .{
-    kind = xx kind,
-    version = version,
-    epoch = epoch,
-    seq_no = seq_no,
-    length = length,
-  };
-}
-
-_dtls_handshake_header_deserialize :: (reader: *Bytes_Reader) -> DTLS_Handshake_Header {
-  msg_kind := read_bytes(reader, u8);
-  msg_length := read_string(reader, 3);
-  msg_seq := read_bytes(reader, u16);
-  msg_frag_offset := read_string(reader, 3);
-  msg_len_offset := read_string(reader, 3);
-
-  return .{
-    kind = xx msg_kind,
-    length = bytes_to_int(msg_length, u32),
-    message_seq = xx msg_seq,
-    fragment_offset = bytes_to_int(msg_frag_offset, u32),
-    fragment_length = bytes_to_int(msg_len_offset, u32),
-  };
-}
-
-_dtls_client_hello_deserialize :: (reader: *Bytes_Reader) -> DTLS_Client_Hello {
-  version_hi := read_bytes(reader, u8);
-  version_lo := read_bytes(reader, u8);
-
-  version := DTLS_Protocol_Version.{
-    major = version_hi,
-    minor = version_lo,
-  };
-
-  gmt_unix_time := read_bytes(reader, u32);
-  random_bytes := read_string(reader, 28);
-
-  rnd := DTLS_Random.{
-    gmt_unix_time = gmt_unix_time,
-    random_bytes = random_bytes,
-  };
-
-  session_id: []u8;
-  session_id_length := read_bytes(reader, u8);
-  if session_id_length > 0 {
-    // @leak this should be on temporary allocator in peer context or something bru
-    session_id = xx copy_string(xx read_string_no_copy(reader, session_id_length));
-  }
-  cookie: []u8;
-  cookie_length := read_bytes(reader, u8);
-  if cookie_length > 0 {
-    // @leak this should be on temporary allocator in peer context or something bru
-    cookie = xx copy_string(xx read_string_no_copy(reader, cookie_length));
-  }
-  cipher_suite_length := read_bytes(reader, u16) / 2;
-  cipher_suites: [..]DTLS_Cipher_Suite;
-
-  // @leak this should be on temporary allocator in peer context or something bru
-  array_reserve(*cipher_suites, cipher_suite_length);
-  for 0..cipher_suite_length-1 {
-    cipher_hi := read_bytes(reader, u8);
-    cipher_lo := read_bytes(reader, u8);
-    array_add(*cipher_suites, .{cipher_hi, cipher_lo});
-  }
-
-  compression_method: []DTLS_Compression_Method;
-  compression_method_length := read_bytes(reader, u8);
-  if compression_method_length > 0 {
-    // @leak this should be on temporary allocator in peer context or something bru
-    compression_method = cast,force([]DTLS_Compression_Method) (cast([]u8) copy_string(xx read_string_no_copy(reader, compression_method_length)));
-  }
-
-  return .{
-    client_version = version,
-    random = rnd,
-    session_id = session_id,
-    cookie = cookie,
-    cipher_suites = cipher_suites,
-    compression_methods = compression_method,
-  };
-}
-_dtls_hello_verify_request_deserialize :: (reader: *Bytes_Reader) -> DTLS_Hello_Verify {
-  version_hi := read_bytes(reader, u8);
-  version_lo := read_bytes(reader, u8);
-
-  version := DTLS_Protocol_Version.{
-    major = version_hi,
-    minor = version_lo,
-  };
-
-  cookie: []u8;
-  cookie_length := read_bytes(reader, u8);
-  print("cookie length read is this %\n", cookie_length);
-  if cookie_length > 0 {
-    // @leak this should be on temporary allocator in peer context or something bru
-    cookie = xx copy_string(xx read_string_no_copy(reader, cookie_length));
-  }
-  return .{
-    server_version = version,
-    cookie = cookie,
-  };
-}
-
-_dtls_handshake_deserialize :: (reader: *Bytes_Reader, kind: DTLS_Handshake_Kind) -> DTLS_Handshake_Value {
-  as_value: DTLS_Handshake_Value;
-  if kind == {
-    case .CLIENT_HELLO; {
-      value := _dtls_client_hello_deserialize(reader);
-      set(*as_value, value);
+    if it.type.type == .STRUCT {
+      omit_size := ifx has_note(it.notes, "DefaultSize") true else false;
+      as_any: Any;
+      as_any.type = it.type;
+      as_any.value_pointer = x.value_pointer.(*u8) + it.offset_in_bytes;
+      _deserialize(reader, *as_any, omit_size);
+      continue;
     }
-    case .HELLO_VERIFY_REQUEST; {
-      value := _dtls_hello_verify_request_deserialize(reader);
-      set(*as_value, value);
+
+    if size_notes_ommitable != true {
+      assert(notes.count != 0, tprint("struct '%' field '%' has no notes, cannot serialize!", x_type.name, it.name));
     }
-    case;{
-    assert(kind == .CLIENT_HELLO, tprint("dtls handshake kind % is not implemented!", kind));
+
+    sz := ifx notes.count == 0 || has_note(notes, "DefaultSize") it.type.runtime_size else string_to_int(notes[1]);
+    assert(sz != -1);
+
+    if has_note(notes, "Size") || notes.count == 0 || has_note(notes, "DefaultSize")  {
+      if sz == {
+        case 1; read_bytes_inplace(reader, (x.value_pointer + it.offset_in_bytes).(*u8));
+        case 2; read_bytes_inplace(reader, (x.value_pointer + it.offset_in_bytes).(*u16));
+        case 4; read_bytes_inplace(reader, (x.value_pointer + it.offset_in_bytes).(*u32));
+        case 8; read_bytes_inplace(reader, (x.value_pointer + it.offset_in_bytes).(*u64));
+        case; unreachable("size % cannot be converted to int for struct field %.%", sz, x_type.name, it.name);
+      }
+    } else if has_note(notes, "Vla") {
+      if it.type.type != .ARRAY {
+        unreachable("Vla needs to be array provided % for %.%\n", it.type.type, x_type.name, it.name);
+      }
+
+      vla_array_info := it.type.(*Type_Info_Array);
+      array_start_ptr := x.value_pointer.(*u8) + it.offset_in_bytes;
+
+      inner_type := vla_array_info.element_type;
+      inner_type_size := inner_type.runtime_size;
+
+
+      read_sz := string_to_int(notes[1]);
+      sz := 0;
+      if read_sz == {
+        case 1; read_bytes_inplace(reader, (*sz).(*u8));
+        case 2; read_bytes_inplace(reader, (*sz).(*u16));
+        case 4; read_bytes_inplace(reader, (*sz).(*u32));
+        case 8; read_bytes_inplace(reader, (*sz).(*u64));
+        case; unreachable("size % cannot be converted to int for struct field %.%", sz, x_type.name, it.name);
+      }
+      read_array: [..]Any;
+      read_array.allocator = temp;
+
+      if it.type.type == .STRUCT {
+        bytes_read := 0;
+        count := 0;
+        while bytes_read < sz {
+          as_any: Any;
+          as_any.type = it.type;
+          as_any.value_pointer = talloc(inner_type_size);
+
+          omit_size := ifx has_note(it.notes, "DefaultSize") true else false;
+          start := reader.cursor;
+          read_struct := _deserialize(reader, *as_any, omit_size);
+          array_add(*read_array, read_struct); 
+          end := reader.cursor;
+          bytes_read += end - start;
+          count += 1;
+        }
+        // malformed packet
+        print("read % bytes while sz was %\n", bytes_read, sz);
+        if bytes_read > sz unreachable("oh healll nawww!");
+        vla_as_array := array_start_ptr.(*[]u8);
+        vla_as_array.count = read_array.count;
+
+        // @leak
+        reflection_array: [..]u8;
+        for read_array {
+          reflection_array_add(*reflection_array, it.value_pointer, it.type);
+        }
+        vla_as_array.data = reflection_array.data;
+
+      } else {
+        // @leak
+        str := xx copy_string(xx read_string_no_copy(reader,  sz));
+        vla_as_array := array_start_ptr.(*[]u8);
+        vla_as_array.data = str.data;
+        vla_as_array.count = sz / inner_type.runtime_size;
+      }
+    } else if has_note(notes, "Array") {
+      view := read_string_no_copy(reader, sz);
+      data_ptr := x.value_pointer.(*u8) + it.offset_in_bytes;
+      if it.type.type == .INTEGER {
+        memcpy(data_ptr + it.type.runtime_size - sz, view.data, sz);
+        byte_swap_inplace(data_ptr, it.type.runtime_size);
+      } else if it.type.type == .ARRAY {
+        as_array_type_info := it.type.(*Type_Info_Array);
+        array_kind := as_array_type_info.array_type;
+        if array_kind == .FIXED unreachable("only fixed array is supported given % in %.%\n",array_kind, x_type.name, it.name);
+
+        count, data := get_array_count_and_data(x.value_pointer.(*u8) + it.offset_in_bytes, as_array_type_info);
+        assert(count >= sz, tprint("array_count % is less than @Size % for %.%\n", count, sz, x_type.name, it.name));
+        memcpy(data, view.data, sz);
+      }
+
+    } else {
+      unreachable("failed to deserialize message %.% has unknown notes %!\n", x_type.name, it.name, notes);
     }
   }
-  return as_value;
 }
 
 
 dtls_message_deserialize :: (buf: []u8) -> DTLS_Handshake_Message {
   reader := Bytes_Reader.{ bytes = buf };
-  rcd := _dtls_record_deserialize(*reader);
-  msg_hdr := _dtls_handshake_header_deserialize(*reader);
-  handshake := _dtls_handshake_deserialize(*reader, msg_hdr.kind);
-
-  msg := DTLS_Handshake_Message.{
-    header = msg_hdr,
-    record = rcd,
-    value = handshake,
+  record: DTLS_Record;
+  hdr: DTLS_Handshake_Header;
+  verify: DTLS_Hello_Verify;
+  value: DTLS_Handshake_Value;
+  _deserialize(*reader, *to_any(*record));
+  _deserialize(*reader, *to_any(*hdr));
+  _deserialize(*reader, *to_any(*verify));
+  set(*value, verify);
+  return .{
+    record = record,
+    header = hdr,
+    value = value,
   };
-  return msg;
+
 }
 
 dtls_handsake_record_default :: (seq_no: Pair(u32,u16)) -> DTLS_Record {
@@ -532,12 +417,11 @@ dtls_generate_cookie :: () -> []u8 {
 // Cookie = HMAC(Secret, Client-IP, Client-Parameters)
 }
 
-f :: (writer: *Bytes_Writer, x: Any, size_notes_ommitable := false, caller_loc := #caller_location){
+_serialize :: (writer: *Bytes_Writer, x: Any, size_notes_ommitable := false, caller_loc := #caller_location){
   assert(x.type.type == .STRUCT);
   x_type := cast(*Type_Info_Struct)x.type;
   
   for x_type.members {
-    start := writer.cursor;
     if equal(it.name, "_") continue;
     notes := it.notes;
     
@@ -546,7 +430,7 @@ f :: (writer: *Bytes_Writer, x: Any, size_notes_ommitable := false, caller_loc :
       as_any.type = it.type.(*Type_Info_Struct);
       as_any.value_pointer = x.value_pointer + it.offset_in_bytes;
       omit_size := ifx has_note(it.notes, "DefaultSize") true else false;
-      f(writer, as_any, omit_size);
+      _serialize(writer, as_any, omit_size);
       continue;
     }
     if size_notes_ommitable != true {
@@ -605,7 +489,7 @@ f :: (writer: *Bytes_Writer, x: Any, size_notes_ommitable := false, caller_loc :
           as_any: Any;
           as_any.type = inner_type;
           as_any.value_pointer = vla_array_data + it * inner_type_size;
-          f(writer, as_any, omit_size);
+          _serialize(writer, as_any, omit_size);
         }
       } else {
         write_string(writer, cast(string) as_byte_slice);
@@ -627,9 +511,9 @@ f :: (writer: *Bytes_Writer, x: Any, size_notes_ommitable := false, caller_loc :
     } else {
         unreachable("Invalid Directive for \"%\" for %.%", notes[0], x_type.name, it.name);
     }
-    end := writer.cursor;
   }
 }
+
 dtls_message_serialize :: (msg: *DTLS_Handshake_Message) -> []u8 {
   total_length := DTLS_RECORD_SIZE + msg.record.length;
   serialized: []u8 = xx alloc_string(total_length);
@@ -638,14 +522,13 @@ dtls_message_serialize :: (msg: *DTLS_Handshake_Message) -> []u8 {
     bytes = serialized,
     should_swap = true,
   };
-  f(*writer, msg.record);
-
-  f(*writer, msg.header);
+  _serialize(*writer, msg.record);
+  _serialize(*writer, msg.header);
 
   value_as_any: Any;
   value_as_any.type = msg.value.tag.(*Type_Info);
   value_as_any.value_pointer = msg.value.bytes.data;
-  f(*writer, value_as_any);
+  _serialize(*writer, value_as_any);
 
   return writer.bytes;
 }
@@ -751,7 +634,7 @@ dtls_message_get_size :: ($msg_type: Type, values: ..Any, $loc := #caller_locati
   }
   // can we do this on comptime??
   if values.count != n_vlas
-    assert(false, tprint("struct % has % VLAs but % provided!",msg_type ,n_vlas, values.count));
+    assert(false, tprint("struct % has % VLAs but % provided!", msg_type, n_vlas, values.count));
 
   // for values sz += it.value_pointer(*).count * size_of(type_of(it.data.*));
   return sz;
