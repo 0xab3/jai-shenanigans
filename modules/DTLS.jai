@@ -292,7 +292,7 @@ _deserialize :: (reader: *Bytes_Reader, x: *Any, size_notes_ommitable := false, 
       } else if it.type.type == .ARRAY {
         as_array_type_info := it.type.(*Type_Info_Array);
         array_kind := as_array_type_info.array_type;
-        if array_kind == .FIXED unreachable("only fixed array is supported given % in %.%\n",array_kind, x_type.name, it.name);
+        if array_kind != .FIXED unreachable("only fixed array is supported given % in %.%\n",array_kind, x_type.name, it.name);
 
         count, data := get_array_count_and_data(x.value_pointer.(*u8) + it.offset_in_bytes, as_array_type_info);
         assert(count >= sz, tprint("array_count % is less than @Size % for %.%\n", count, sz, x_type.name, it.name));
@@ -386,6 +386,7 @@ dtls_message_client_hello :: (ctx: *DTLS_Context, session_id: []u8, cookie: []u8
   hello_verify := DTLS_Client_Hello.{
     client_version = DTLS_VERSION_1_2,
     random = DTLS_Random.{ _get_gm_time(), random_n_bytes(28) },
+    cookie = cookie,
     cipher_suites = cipher_suites,
     compression_methods = comp_methods,
     extensions = exts,
@@ -477,7 +478,6 @@ dtls_message_server_hello :: (ctx: *DTLS_Context, client_hello: DTLS_Handshake_M
     header = header,
     value = value,
   };
-  ctx.seq_no += 1;
   return msg;
 }
 
@@ -497,19 +497,29 @@ dtls_message_server_hello_done :: (ctx: *DTLS_Context) -> DTLS_Handshake_Message
     header = header,
     value = value,
   };
-  ctx.seq_no += 1;
   return msg;
 }
 
 dtls_message_get_cookie :: (msg: DTLS_Handshake_Message) -> bool, []u8 {
   if msg.header.kind == {
     case .CLIENT_HELLO; {
-      as_hello := isa(*msg.value, DTLS_Client_Hello); assert(as_hello != null);
-      return as_hello.cookie.count != 0, as_hello.cookie;
+      value := isa(*msg.value, DTLS_Client_Hello); assert(value != null);
+      return value.cookie.count != 0, value.cookie;
+    }
+    case .HELLO_VERIFY_REQUEST; {
+      value := isa(*msg.value, DTLS_Hello_Verify); assert(value != null);
+      return value.cookie.count != 0, value.cookie;
     }
     case; assert(false, "unimplemented!");
   }
   return false, .[];
+}
+// @todo conn and to should be the part of context
+dtls_message_send :: (ctx: *DTLS_Context, msg: DTLS_Handshake_Message, conn: Socket_Connection, to: Socket_Address) {
+  deser := dtls_message_serialize(*msg);
+  sz := udp_write(conn.sock, to, xx deser);
+  assert(sz == deser.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
+  ctx.seq_no += 1;
 }
 
 // @todo implement this
@@ -777,3 +787,4 @@ dtls_message_get_size :: ($msg_type: Type, values: ..Any, $loc := #caller_locati
 #import "Log";
 #import "String";
 #import "Reflection";
+#import "Net";
