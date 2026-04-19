@@ -114,6 +114,16 @@ read_string :: (using reader: *Bytes_Reader, $SZ: s64) -> [SZ]u8 {
 
   return _read;
 }
+hex_array :: (value: [] u8) -> string {
+    builder: String_Builder;
+    print_to_builder(*builder,"[");
+    for value {
+      if (it >> 4) & 0xf == 0 print_to_builder(*builder, "0%, ", formatHex(it));
+      else print_to_builder(*builder, "%, ", formatHex(it));
+    }
+    print_to_builder(*builder,"]");
+    return builder_to_string(*builder);
+}
 
 hex_string :: (value: [] u8) -> string {
     builder: String_Builder;
