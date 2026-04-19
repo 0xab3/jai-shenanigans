@@ -236,42 +236,35 @@ _deserialize :: (reader: *Bytes_Reader, x: *Any, size_notes_ommitable := false, 
 
 
       read_sz := string_to_int(notes[1]);
-      sz := 0;
-      if read_sz == {
-        case 1; read_bytes_inplace(reader, (*sz).(*u8));
-        case 2; read_bytes_inplace(reader, (*sz).(*u16));
-        case 4; read_bytes_inplace(reader, (*sz).(*u32));
-        case 8; read_bytes_inplace(reader, (*sz).(*u64));
-        case; unreachable("size % cannot be converted to int for struct field %.%", sz, x_type.name, it.name);
-      }
+      sz := bytes_to_int(read_string_no_copy(reader, read_sz), s64);
+      assert(read_sz <= 8);
+
       read_array: [..]Any;
       read_array.allocator = temp;
 
-      if it.type.type == .STRUCT {
+      if inner_type.type == .STRUCT {
         bytes_read := 0;
-        count := 0;
         while bytes_read < sz {
           as_any: Any;
-          as_any.type = it.type;
+          as_any.type = inner_type;
           as_any.value_pointer = talloc(inner_type_size);
 
           omit_size := ifx has_note(it.notes, "DefaultSize") true else false;
           start := reader.cursor;
-          read_struct := _deserialize(reader, *as_any, omit_size);
-          array_add(*read_array, read_struct); 
+          _deserialize(reader, *as_any, omit_size);
+          array_add(*read_array, as_any); 
           end := reader.cursor;
           bytes_read += end - start;
-          count += 1;
         }
         // malformed packet
-        print("read % bytes while sz was %\n", bytes_read, sz);
+        log_debug("read % bytes while sz was %\n", bytes_read, sz);
         if bytes_read > sz unreachable("oh healll nawww!");
         vla_as_array := array_start_ptr.(*[]u8);
         vla_as_array.count = read_array.count;
-
         // @leak
         reflection_array: [..]u8;
         for read_array {
+          assert(it.value_pointer != null && it.type.type == .STRUCT);
           reflection_array_add(*reflection_array, it.value_pointer, it.type);
         }
         vla_as_array.data = reflection_array.data;
@@ -336,21 +329,19 @@ _dtls_value_deserialize :: (reader: *Bytes_Reader, kind: DTLS_Handshake_Kind) ->
   return value;
 }
 
-dtls_message_deserialize :: (buf: []u8) -> DTLS_Handshake_Message {
+dtls_message_deserialize :: (buf: []u8) -> DTLS_Handshake_Message, s64 {
   reader := Bytes_Reader.{ bytes = buf };
   record: DTLS_Record;
   hdr: DTLS_Handshake_Header;
   _deserialize(*reader, *to_any(*record));
   _deserialize(*reader, *to_any(*hdr));
-  print("this is the record %\n", record);
-  print("this is the header %\n", hdr);
   value := _dtls_value_deserialize(*reader, hdr.kind);
-  return .{
+  msg := DTLS_Handshake_Message.{
     record = record,
     header = hdr,
     value = value,
   };
-
+  return msg, reader.cursor;
 }
 
 dtls_handsake_record_default :: (seq_no: Pair(u32,u16)) -> DTLS_Record {
