@@ -9,9 +9,15 @@ Session_Level_Section :: struct {
   session_name: string;
   time_description: string; // we don't care right now
   attributes: [..]string;
+  fingerprint: DTLS_Certificate_Fingerprint;
 
   ice_ufrag: string; // should not be here but shoved it anyways for convinience we will remove it later
   ice_pwd: string;
+};
+
+DTLS_Certificate_Fingerprint :: struct {
+  hash_algorithm: string;
+  hash: string;
 };
 
 Media_Description :: struct {
@@ -32,7 +38,7 @@ Media_Description :: struct {
   ice_pwd: string;
 };
 Session_Description :: struct {
-  sls: Session_Level_Section;
+  using #as sls: Session_Level_Section;
   mds: [..]Media_Description;
 };
 
@@ -79,14 +85,21 @@ parse_sdp :: (sdp_as_str: string) -> Session_Description, SDP_Parse_Error {
         md.connection = value;
       }
       case #char "a"; {
-        if state == .PARSING_SLS {
-          array_add(*sdp.sls.attributes, value);
-          continue;
-        }
-
         found, _attrib_name, _attrib_value := split_from_left(value, ":");
         attrib_name := trim(_attrib_name);
-        attrib_value := copy_string(trim_right(_attrib_value));
+        attrib_value := trim_right(_attrib_value);
+
+        if state == .PARSING_SLS {
+          if equal(_attrib_name, "fingerprint") {
+            attrib_value = trim(attrib_value);
+            found, hash_func, fingerprint := split_from_left(attrib_value, " "); assert(found);
+            sdp.fingerprint = .{copy_string(hash_func), copy_string(fingerprint)};
+          }else {
+            array_add(*sdp.sls.attributes, value);
+          }
+          continue;
+        }
+        attrib_value = copy_string(attrib_value);
 
         if !found {
           if equal(value, "sendrecv") md.send_recv = true;
@@ -104,8 +117,8 @@ parse_sdp :: (sdp_as_str: string) -> Session_Description, SDP_Parse_Error {
           sdp.sls.ice_ufrag = attrib_value;
         }
         else if equal(attrib_name, "ice-pwd") {
-        md.ice_pwd = attrib_value;
-        sdp.sls.ice_pwd = attrib_value;
+          md.ice_pwd = attrib_value;
+          sdp.sls.ice_pwd = attrib_value;
         }
       }
       case #char "m"; {

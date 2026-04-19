@@ -136,18 +136,35 @@ DTLS_Extension_Kind :: enum u16 {
   EXTEND_MASTER_SECRET :: 23;
 };
 
+DTLS_Hash_Algorithm :: enum u8 {
+  NONE    ::  0;
+  MD5     ::  1;
+  SHA1    ::  2;
+  SHA224  ::  3;
+  SHA256  ::  4;
+  SHA384  ::  5;
+  SHA512  ::  6;
+};
 
-DTLS_Signature_Algorithm :: struct {
+DTLS_Signature_Algorithmm :: enum u8 {
+  ANONYMOUS  ::  0;
+  RSA        ::  1;
+  DSA        ::  2;
+  ECDSA      ::  3;
+};
+
+// @todo fix this
+DTLS_Signature_Hash_Algorithm :: struct {
   _: void; @Size @2
-  high: u8; @Size @1
-  low: u8; @Size @1
+  high: u8; @DefaultSize
+  low: u8; @DefaultSize
 };
 
-DTLS_Signature_Algorithms :: struct {
-  algos: []DTLS_Signature_Algorithm; @Vla @2
+DTLS_Signature_Hash_Algorithms :: struct {
+  algos: []DTLS_Signature_Hash_Algorithm; @Vla @2
 
 };
-SIGNATURE_ALGORITHM_RSA_PKCS1_SHA256 :: DTLS_Signature_Algorithm.{ 0x04, 0x03 };
+SIGNATURE_ALGORITHM_RSA_PKCS1_SHA256 :: DTLS_Signature_Hash_Algorithm.{ 0x04, 0x03 };
 
 DTLS_Server_Hello :: struct {
   server_version := DTLS_VERSION_1_0; @InnerSize // 1.0 
@@ -176,6 +193,35 @@ DTLS_Hello_Verify :: struct {
 
 DTLS_Server_Hello_Done :: struct {};
 DTLS_Hello_Request :: struct {};
+
+DTLS_Certificate :: struct {
+  cert :[]u8; @Vla @3
+}
+
+DTLS_Certificate_List :: struct {
+  certs :[]DTLS_Certificate; @Vla @3
+}
+// DTLS_Server_Key_Exchange :: struct {
+//   select (KeyExchangeAlgorithm) {
+//     case dh_anon:
+//     ServerDHParams params;
+//     case dhe_dss:
+//     case dhe_rsa:
+//     ServerDHParams params;
+//     digitally-signed struct {
+//       opaque client_random[32];
+//       opaque server_random[32];
+//       ServerDHParams params;
+//     } signed_params;
+//     case rsa:
+//     case dh_dss:
+//     case dh_rsa:
+//     struct {} ;
+//     /* message is omitted for rsa, dh_dss, and dh_rsa */
+//     /* may be extended, e.g., for ECDH -- see [TLSECC] */
+//   };
+// } ;
+
 
 DTLS_Handshake_Value :: Tagged_Union(
   DTLS_Hello_Request,
@@ -324,6 +370,12 @@ _dtls_value_deserialize :: (reader: *Bytes_Reader, kind: DTLS_Handshake_Kind) ->
       _deserialize(reader, *to_any(*serialized));
       set(*value, serialized);
     }
+    case .CERTIFICATE; {
+      serialized: DTLS_Certificate_List;
+      _deserialize(reader, *to_any(*serialized));
+      set(*value, serialized);
+    }
+    case .SERVER_KEY_EXCHANGE; { }
     case; unreachable("% deserialize is not implemented!", kind);
   }
   return value;
@@ -425,7 +477,7 @@ _get_supported_cipher_suite :: (halo: DTLS_Client_Hello) -> bool, DTLS_Cipher_Su
   return false, .{};
 }
 _extension_signature_algorithms :: () -> DTLS_Extension {
-  algo := DTLS_Signature_Algorithms.{ .[SIGNATURE_ALGORITHM_RSA_PKCS1_SHA256] };
+  algo := DTLS_Signature_Hash_Algorithms.{ .[SIGNATURE_ALGORITHM_RSA_PKCS1_SHA256] };
   bytes := alloc_string(4);
   writer := Bytes_Writer.{
     bytes = xx bytes,

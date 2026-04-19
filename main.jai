@@ -166,14 +166,14 @@ create_msghdr :: (buf: []u8) -> *msghdr {
 }
 
 do_connectivity_check_for_pair :: (pc: *Peer_Connection(*IO_Uring)) {
-
   for * pc.check_list.pairs {
     // @todo this should be media level not session level
     pwd := pc.remote_description.sls.ice_pwd;
 
     // @todo @proirity the tie breaker is hardcoded and we do not compute priority
+    ufrag := ifx it.remote.ufrag.count != 0 it.remote.ufrag else pc.remote_description.ice_ufrag;
     msg := stun_message_prepare(.BIND,
-      stun_attribute_username(it.local.ufrag, it.remote.ufrag),
+      stun_attribute_username(it.local.ufrag, ufrag),
       stun_attribute_ice_controlled(0xbaface7fad843c7b),
       stun_attribute_priority(0x7effffff),
       stun_attribute_integrity(pwd),
@@ -193,37 +193,114 @@ do_connectivity_check_for_pair :: (pc: *Peer_Connection(*IO_Uring)) {
     assert(it.local.socket_connection.sock > 2);
     sz := stun_message_send(*msg, it.local.socket_connection.sock, candidate_sock);
     assert(sz != -1);
+    is_added := Hash_Table.table_add(*pc.check_list.tid_lut, msg.transaction_id, it);
+    assert(is_added != null, "OOM!");
+  }
+}
+
+
+// @todo hash_algo looks ass
+verify_cert :: (cert: *DTLS_Certificate, fingerprint: DTLS_Certificate_Fingerprint) -> bool {
+  _create_fingerprint :: (cert_hashed: []u8) -> string {
+    builder := String_Builder.{allocator = temp};
+    for cert_hashed {
+      if (it >> 4) & 0xf == 0 print_to_builder(*builder, "0%", formatHex(it));
+      else print_to_builder(*builder, "%", formatHex(it));
+      if it_index != cert_hashed.count -1  {
+        print_to_builder(*builder, ":");
+      }
+    }
+    str := builder_to_string(*builder);
+    to_upper_in_place(str);
+    return str;
+  }
+  fp := fingerprint;
+  if equal(fp.hash_algorithm, "sha-256") {
+    cert_hashed := sha256(cert.cert);
+    cert_fingerprint := _create_fingerprint(cert_hashed);
+    if equal(cert_fingerprint, fingerprint.hash) {
+      return true;
+    } else {
+      log_err("verify cert failed ours is '%', got '%'\n", cert_fingerprint ,fingerprint.hash);
+      return false;
+    }
+  } else {
+    unreachable("hashing algorithm % for fingerprint validation is not implemented!", fp.hash_algorithm);
+  }
+
+
+  return false;
+}
+
+send_dtls_client_hello :: (dtls_ctx: *DTLS_Context, cookie: []u8, conn: Socket_Connection, to: Socket_Address) {
+  srtp_ext := srtp_get_extensions(.AES128_CM_HMAC_SHA1_80);
+  signature_algo := _extension_signature_algorithms();
+  exts := DTLS_Extension.[srtp_ext, signature_algo];
+  dtls_hello := dtls_message_prep_client_hello(dtls_ctx, xx "", cookie, exts);
+  dtls_message_send(dtls_ctx, dtls_hello, conn, to);
+}
+
+handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uring), from: Socket_Address, buf: []u8) {
+  mut_buf := buf;
+  conn := read_ctx.sock_conn;
+  to := from;
+  deser_bytes := 0;
+  dtls_ctx := *pc.dtls_ctx;
+  while mut_buf.count > 0 {
+    msg:, deser_bytes = dtls_message_deserialize(mut_buf);
+    mut_buf = array_view(mut_buf, deser_bytes);
+
+    if dtls_ctx.role == .SERVER {
+      ok := dtls_message_get_cookie(msg);
+      if !ok {
+        verify := dtls_message_hello_verify(dtls_ctx, msg, dtls_generate_cookie());
+        dtls_message_send(dtls_ctx, verify, conn, to);
+        return;
+      }
+      if msg.header.kind == {
+        case .CLIENT_HELLO; {
+            srtp_ext := srtp_get_extensions(.AES128_CM_HMAC_SHA1_80, mki = .[]);
+
+            reply := dtls_message_server_hello(dtls_ctx, msg, .[srtp_ext]);
+            dtls_message_send(dtls_ctx, reply, conn, to);
+
+            reply = dtls_message_server_hello_done(dtls_ctx);
+            dtls_message_send(dtls_ctx, reply, conn, to);
+        }
+      }
+    } else {
+      if msg.header.kind == {
+        case .HELLO_VERIFY_REQUEST; {
+          ok, cookie := dtls_message_get_cookie(msg); assert(ok);
+          // @leak??
+          dtls_ctx.cookie = xx copy_string(xx cookie);
+          send_dtls_client_hello(dtls_ctx, cookie, read_ctx.sock_conn, to);
+        }
+        case .SERVER_HELLO; {};
+        case .CERTIFICATE; {
+          cert_list := isa(msg.value, DTLS_Certificate_List); assert(cert_list != null);
+          assert(cert_list.certs.count == 1);
+          cert := cert_list.certs[0];
+          ok := verify_cert(*cert, get_remote_fingerprint(pc));
+          if !ok {
+            assert(ok, "certificate verification failed!!");
+          }
+        };
+        case; {
+          print("%\n", msg);
+        }
+      }
+    }
   }
 }
 
 on_io_udp_read :: (pc: *Peer_Connection(*IO_Uring), read_ctx: *IO_UDP_Read(*IO_Uring), from: Socket_Address, buf: []u8) {
+  to := from;
+  conn := read_ctx.sock_conn;
   // https://datatracker.ietf.org/doc/html/rfc5764#section-5.1.2
   if 127 < buf[0] && buf[0] < 192 { // rtp
   }else if 19 < buf[0] && buf[0] < 64 { // dtls
-    dtls_ctx := *pc.dtls_ctx;
-    print("got dtls packet less gooo!\n");
-    msg := dtls_message_deserialize(buf);
-    ok := dtls_message_get_cookie(msg);
-    if !ok {
-      verify := dtls_message_hello_verify(dtls_ctx, msg, dtls_generate_cookie());
-      serialized := dtls_message_serialize(*verify);
-      sz := udp_write(read_ctx.sock_conn.sock, from, xx serialized);
-      assert(sz == serialized.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
-      return;
-    }
-    if msg.header.kind == .CLIENT_HELLO {
-      srtp_ext := srtp_get_extensions(.AES128_CM_HMAC_SHA1_80, mki = .[]);
-      reply := dtls_message_server_hello(dtls_ctx, msg, .[srtp_ext]);
-      serialized := dtls_message_serialize(*reply);
-      sz := udp_write(read_ctx.sock_conn.sock, from, xx serialized);
-      assert(sz == serialized.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
-
-      reply = dtls_message_server_hello_done(dtls_ctx);
-      serialized = dtls_message_serialize(*reply);
-      sz = udp_write(read_ctx.sock_conn.sock, from, xx serialized);
-      assert(sz == serialized.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
-
-    }
+    handle_dtls_message(pc, read_ctx, from, buf);
   }else if buf[0] < 2 { // stun
     dtls_ctx := *pc.dtls_ctx;
     msg := stun_message_deserialize(buf);
@@ -241,15 +318,13 @@ on_io_udp_read :: (pc: *Peer_Connection(*IO_Uring), read_ctx: *IO_UDP_Read(*IO_U
         val, ok := Hash_Table.table_find(*pc.check_list.tid_lut, msg.transaction_id);
         if !ok {
           id := msg.transaction_id;
-          log_err("failed to get ice pair for t_id %_%\n", id.first, id.second);
+          log_err("failed to get ice pair for t_id %_%\n", formatHex(id.first), formatHex(id.second));
           assert(false);
         }
+        // @todo this is not the best way to do this shit, pion does exponential backoff and shit
+        // add smth in the internal state of dtls ctx to track if we should send hello or not
+        if pc.dtls_ctx.role == .CLIENT && !val.is_connected send_dtls_client_hello(*pc.dtls_ctx, xx "", read_ctx.sock_conn, from);
         val.is_connected = true;
-
-        // dtls_hello := dtls_client_hello();
-        // serialized := dtls_message_serialize();
-        // sz := udp_write(read_ctx.sock_conn.sock, from, xx serialized);
-        // assert(sz == serialized.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
         // @todo we need to handle this to implement failing of ice connection
       }
       case .ERROR_RESPONSE; assert(false, "unimplemented!");
@@ -325,6 +400,7 @@ set_pp :: () {
 }
 
 main :: () {
+  set_pp();
   params: IO_Uring_Params;
   uring := New(IO_Uring);
   err := uring_init(uring, *params);

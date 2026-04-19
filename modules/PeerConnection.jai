@@ -46,9 +46,14 @@ add_ice_candidate :: (pc: *Peer_Connection($T), candidate: Ice_Candidate) {
   }
 }
 new_peer_connection :: (config: Peer_Configuration, udata: $T) -> Peer_Connection(T) {
+  // @todo the dtls context should be set when we parse remote description based on it
+  // says active passive or smth idfk
   pc: Peer_Connection(T) = .{
     config = config,
     udata = udata,
+    dtls_ctx = .{
+      role = .CLIENT,
+    },
   };
   return pc;
 
@@ -78,6 +83,10 @@ get_local_ice_ufrag :: (pc: Peer_Connection($T)) -> string {
 get_local_ice_pwd :: (pc: Peer_Connection($T)) -> string {
   assert(pc.local_description.sls.ice_pwd.count != 0, "local description is probably not set!");
   return pc.local_description.sls.ice_pwd;
+}
+
+get_remote_fingerprint :: (pc: Peer_Connection($T)) -> DTLS_Certificate_Fingerprint {
+  return pc.remote_description.fingerprint;
 }
 
 gather_local_candidates :: (pc: *Peer_Connection($T)) {
