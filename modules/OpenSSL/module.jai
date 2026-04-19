@@ -15,6 +15,10 @@ OPENSSL_init_ssl :: (opts: u64, settings: *void) -> s32 #foreign libssl;
 SSL_METHOD :: void;
 SSL_CTX :: void;
 SSL :: void;
+X509_STORE :: void;
+X509 :: void;
+X509_STORE_CTX :: void;
+BIO :: *void;
 
 TLS_client_method :: () -> *SSL_METHOD #foreign libssl;
 SSL_CTX_new :: (meth: *SSL_METHOD) -> *SSL_CTX #foreign libssl;
@@ -31,6 +35,32 @@ HMAC :: (evp_md: *EVP_MD, key: *u8, key_len: s32, data: *u8, data_len: u64,
                     md: *u8, md_len: *u32) -> *u8 #foreign libssl;
 EVP_sha1 :: () -> *EVP_MD #foreign libssl;
 
+// useless
+BIO_new_mem_buf :: (buf: *void, len: s32) -> *BIO #foreign libssl;
+
+X509_STORE_new :: () -> *X509_STORE #foreign libssl;
+X509_STORE_set_default_paths :: (s: *X509_STORE) -> s32 #foreign libssl;
+X509_STORE_load_locations :: (s: *X509_STORE, file: *u8, dir: *u8) -> s32 #foreign libssl;
+PEM_read_bio_X509 :: (out: *BIO, x: **X509, cb: *void, udata: *void) -> *void #foreign libssl;
+d2i_X509 :: (x: **void, in: **u8, len: s64) -> *void #foreign libssl;
+X509_STORE_CTX_new :: () -> *X509_STORE_CTX #foreign libssl;
+X509_STORE_CTX_init :: (ctx: *X509_STORE_CTX, trust_store: *X509_STORE,
+    target: *X509, untrusted: *void) -> s32 #foreign libssl;
+X509_verify_cert :: (ctx: *X509_STORE_CTX) -> s32 #foreign libssl;
+X509_STORE_CTX_get_error :: (ctx: *X509_STORE_CTX) -> s32 #foreign libssl;
+X509_verify_cert_error_string :: (n: s32) -> *u8 #foreign libssl;
+SHA256 :: (d: *u8, n: u64, md: *u8) -> *u8 #foreign libssl;
+
+SHA256_HASH_LENGTH :: 32;
+
+sha256 :: (data: []u8) -> [SHA256_HASH_LENGTH]u8 {
+  ret: [SHA256_HASH_LENGTH]u8;
+  assert(data.data != null);
+  assert(data.count > 0);
+  assert(ret.data != null);
+  SHA256(data.data, xx data.count, ret.data);
+  return ret;
+}
 
 hmac_sha1 :: (key: string, msg: string) -> string {
   digest: string;
