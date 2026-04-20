@@ -29,6 +29,10 @@ DTLS_Context :: struct {
   role: enum {CLIENT; SERVER;};
   cookie: []u8;
   seq_no: Pair(u32, u16);
+  local_cert : DTLS_Certificate;
+  remote_cert: DTLS_Certificate;
+  ctx_random: DTLS_Random;
+  remote_last_random: DTLS_Random; // we need this for signature validation
 };
 
 operator + :: (x: Pair(u32, u16), y: s64) -> Pair(u32, u16) {
@@ -164,7 +168,40 @@ DTLS_Signature_Hash_Algorithms :: struct {
   algos: []DTLS_Signature_Hash_Algorithm; @Vla @2
 
 };
-SIGNATURE_ALGORITHM_RSA_PKCS1_SHA256 :: DTLS_Signature_Hash_Algorithm.{ 0x04, 0x03 };
+SIGNATURE_ALGORITHM_RSA_PKCS1_SHA256 :: DTLS_Signature_Hash_Algorithm.{ 0x04, 0x01 };
+SIGNATURE_ALGORITHM_ED25519 :: DTLS_Signature_Hash_Algorithm.{ 0x08, 0x07 };
+
+
+DTLS_ECCurveType :: enum u8 {
+  EXPLICIT_PRIME  :: 1;
+  EXPLICIT_CHAR2  :: 2;
+  NAMED_CURVE     :: 3;
+};
+
+DTLS_ECNamedCurve :: enum u16 {
+  X25519 :: 0x1d;
+};
+
+// @todo @priority @bug this hardcodes the length of public key
+// we need to implement recursive size calculation for @InnerSize 
+// instead using _:void; for size
+DTLS_ECDHEKey_Params :: struct {
+  _: void; @Size @36 
+  type: DTLS_ECCurveType; @DefaultSize
+  name: DTLS_ECNamedCurve; @DefaultSize
+  public_key: []u8; @Vla @1
+};
+DTLS_ECDSignature_Algorithm :: struct {
+  hash_algo: u8; @DefaultSize
+  hash_sign: u8; @DefaultSize
+  signature: []u8; @Vla @2
+};
+
+DTLS_ECDHParams :: struct {
+  key_params: DTLS_ECDHEKey_Params; @InnerSize
+  hash_algorithm: DTLS_ECDSignature_Algorithm; @InnerSize
+};
+
 
 DTLS_Server_Hello :: struct {
   server_version := DTLS_VERSION_1_0; @InnerSize // 1.0 
@@ -197,6 +234,10 @@ DTLS_Hello_Request :: struct {};
 DTLS_Certificate :: struct {
   cert :[]u8; @Vla @3
 }
+
+Public_Key :: struct {
+  key: *EVP_PKEY;
+};
 
 DTLS_Certificate_List :: struct {
   certs :[]DTLS_Certificate; @Vla @3
@@ -375,7 +416,13 @@ _dtls_value_deserialize :: (reader: *Bytes_Reader, kind: DTLS_Handshake_Kind) ->
       _deserialize(reader, *to_any(*serialized));
       set(*value, serialized);
     }
-    case .SERVER_KEY_EXCHANGE; { }
+    case .SERVER_KEY_EXCHANGE; { 
+      serialized: DTLS_ECDHParams;
+      _deserialize(reader, *to_any(*serialized));
+      set(*value, serialized);
+    }
+    case .CERTIFICATE_REQUEST; {
+    }
     case; unreachable("% deserialize is not implemented!", kind);
   }
   return value;
@@ -417,6 +464,9 @@ dtls_handshake_header_default :: (kind: DTLS_Handshake_Kind, message_seq: u16) -
 }
 
 dtls_message_client_hello :: (ctx: *DTLS_Context, session_id: []u8, cookie: []u8, cipher_suites: []DTLS_Cipher_Suite, comp_methods: []DTLS_Compression_Method, exts: []DTLS_Extension) -> DTLS_Handshake_Message {
+
+  // is this session based chat???
+  if ctx.ctx_random.gmt_unix_time == 0 ctx.ctx_random = .{ _get_gm_time(), random_n_bytes(28) };
   record := dtls_handsake_record_default(ctx.seq_no);
   value_size := dtls_message_get_size(DTLS_Client_Hello, session_id, cookie, cipher_suites, comp_methods, exts);
   record.length = cast(u16)(DTLS_HANDSHAKE_HEADER_SIZE + value_size);
@@ -428,7 +478,7 @@ dtls_message_client_hello :: (ctx: *DTLS_Context, session_id: []u8, cookie: []u8
   value: DTLS_Handshake_Value;
   hello_verify := DTLS_Client_Hello.{
     client_version = DTLS_VERSION_1_2,
-    random = DTLS_Random.{ _get_gm_time(), random_n_bytes(28) },
+    random = ctx.ctx_random,
     cookie = cookie,
     cipher_suites = cipher_suites,
     compression_methods = comp_methods,
@@ -476,8 +526,9 @@ _get_supported_cipher_suite :: (halo: DTLS_Client_Hello) -> bool, DTLS_Cipher_Su
   }
   return false, .{};
 }
+// @todo well we force edcsa anyways so ts is not used right now
 _extension_signature_algorithms :: () -> DTLS_Extension {
-  algo := DTLS_Signature_Hash_Algorithms.{ .[SIGNATURE_ALGORITHM_RSA_PKCS1_SHA256] };
+  algo := DTLS_Signature_Hash_Algorithms.{ .[SIGNATURE_ALGORITHM_ED25519] };
   bytes := alloc_string(4);
   writer := Bytes_Writer.{
     bytes = xx bytes,
@@ -508,12 +559,11 @@ dtls_message_server_hello :: (ctx: *DTLS_Context, client_hello: DTLS_Handshake_M
   value: DTLS_Handshake_Value;
   server_hello := DTLS_Server_Hello.{
     server_version = DTLS_VERSION_1_0,
-    random = DTLS_Random.{ _get_gm_time(), random_n_bytes(28) },
+    random = ctx.ctx_random,
     cipher_suite = TLS_RSA_WITH_AES_128_CBC_SHA,
     compression_method = .NULL,
     extensions = exts,
   };
-  print("this is what we generated %\n",hex_string(server_hello.random.random_bytes));
   set(*value, server_hello);
 
   msg := DTLS_Handshake_Message.{
@@ -577,6 +627,39 @@ dtls_generate_cookie :: () -> []u8 {
 // Cookie = HMAC(Secret, Client-IP, Client-Parameters)
 }
 
+dtls_ecdsa_verify :: (buf: []u8, key: Public_Key, signature: []u8) -> bool {
+  ctx := EVP_MD_CTX_new(); assert(ctx != null);
+  assert(ctx != null);
+  defer EVP_MD_CTX_free(ctx);
+  assert(EVP_DigestVerifyInit(ctx, null, EVP_sha256(), null, key.key) == 1);
+  assert(EVP_DigestVerifyUpdate( ctx, buf.data, buf.count) == 1);
+
+  result := EVP_DigestVerifyFinal(ctx, signature.data, cast(s64)signature.count);
+  return result == 1;
+}
+// @todo @perf this is ass
+dtls_certificate_get_pubkey :: (using dtls_cert: DTLS_Certificate) -> Public_Key {
+  as_x509 := d2i_X509(null, *cert.data, xx cert.count);
+  assert(as_x509 != null);
+  pk := Public_Key.{ key = X509_get_pubkey(as_x509) };
+  assert(pk.key != null);
+  X509_free(as_x509);
+  return pk;
+}
+// @leak
+serialize :: (x: $T) -> []u8 {
+  sz := dtls_message_get_size(x);
+  print("size is this bruvskiii %\n", sz);
+  buf: []u8 = xx alloc_string(sz);
+  writer := Bytes_Writer.{
+    bytes = buf,
+    should_swap = true,
+  };
+  _serialize(*writer, x);
+
+  print("sz: %, cursor: %\n",sz, writer.cursor);
+  return buf;
+}
 _serialize :: (writer: *Bytes_Writer, x: Any, size_notes_ommitable := false, caller_loc := #caller_location){
   assert(x.type.type == .STRUCT, tprint("wanted struct got %\n", x.type.type));
   x_type := cast(*Type_Info_Struct)x.type;
@@ -744,6 +827,18 @@ _message_size_calc :: (struct_info: *Type_Info_Struct, caller_loc: Source_Code_L
     struct_info.name ,n_vlas, fully_pathed_filename, line_number, character_number));
   return sz, n_vlas;
 }
+dtls_message_get_size :: (x: $T) -> s64 {
+  arg_array: [..]Any;
+  x_type := type_of(x).(*Type_Info_Struct);
+  for x_type.members {
+    if !has_note(it.notes, "Vla") continue;
+    as_any: Any;
+    as_any.type = it.type;
+    as_any.value_pointer = *x + it.offset_in_bytes;
+    array_add(*arg_array, as_any);
+  }
+  return dtls_message_get_size_runtime(x_type, arg_array);
+}
 
 dtls_message_get_size_runtime :: (msg_type: *Type_Info_Struct, values: []Any, $loc := #caller_location) -> s64 {
   sz, n_vlas := _message_size_calc(msg_type, loc);
@@ -822,6 +917,7 @@ dtls_message_get_size :: ($msg_type: Type, values: ..Any, $loc := #caller_locati
 
 #scope_file
 #import "utils";
+#import "OpenSSL";
 #import "Tagged_Union";
 #import "Basic";
 #import "Random";

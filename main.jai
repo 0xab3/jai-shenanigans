@@ -234,8 +234,7 @@ verify_cert :: (cert: *DTLS_Certificate, fingerprint: DTLS_Certificate_Fingerpri
 
 send_dtls_client_hello :: (dtls_ctx: *DTLS_Context, cookie: []u8, conn: Socket_Connection, to: Socket_Address) {
   srtp_ext := srtp_get_extensions(.AES128_CM_HMAC_SHA1_80);
-  signature_algo := _extension_signature_algorithms();
-  exts := DTLS_Extension.[srtp_ext, signature_algo];
+  exts := DTLS_Extension.[srtp_ext];
   dtls_hello := dtls_message_prep_client_hello(dtls_ctx, xx "", cookie, exts);
   dtls_message_send(dtls_ctx, dtls_hello, conn, to);
 }
@@ -248,7 +247,7 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
   dtls_ctx := *pc.dtls_ctx;
   while mut_buf.count > 0 {
     msg:, deser_bytes = dtls_message_deserialize(mut_buf);
-    mut_buf = array_view(mut_buf, deser_bytes);
+    defer mut_buf = array_view(mut_buf, deser_bytes);
 
     if dtls_ctx.role == .SERVER {
       ok := dtls_message_get_cookie(msg);
@@ -276,7 +275,13 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
           dtls_ctx.cookie = xx copy_string(xx cookie);
           send_dtls_client_hello(dtls_ctx, cookie, read_ctx.sock_conn, to);
         }
-        case .SERVER_HELLO; {};
+        case .SERVER_HELLO; {
+          serv_hello := isa(msg.value, DTLS_Server_Hello); assert(serv_hello != null);
+          assert(serv_hello.cipher_suite == TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256);
+          dtls_ctx.remote_last_random = serv_hello.random;
+          // @todo i think atp we are fine cause we got server hello but 
+          // ig we should do smth here
+        };
         case .CERTIFICATE; {
           cert_list := isa(msg.value, DTLS_Certificate_List); assert(cert_list != null);
           assert(cert_list.certs.count == 1);
@@ -285,7 +290,28 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
           if !ok {
             assert(ok, "certificate verification failed!!");
           }
+          dtls_ctx.remote_cert = cert;
         };
+        case .SERVER_KEY_EXCHANGE; {
+          key_exch := isa(msg.value, DTLS_ECDHParams); assert(key_exch != null);
+          Verify_Struct :: struct {
+            client_random: DTLS_Random; @InnerSize
+            server_random: DTLS_Random; @InnerSize
+            params: DTLS_ECDHEKey_Params; @InnerSize
+          }
+          verify := Verify_Struct.{
+            dtls_ctx.ctx_random,
+            dtls_ctx.remote_last_random,
+            key_exch.key_params, 
+          };
+          as_bytes := serialize(verify,, allocator = temp);
+          key := dtls_certificate_get_pubkey(dtls_ctx.remote_cert);
+          ok := dtls_ecdsa_verify(as_bytes, key, key_exch.hash_algorithm.signature);
+          if !ok {
+            log_err("failed to verify signature of DTLSServerKeyExchange %\n",SSL_error_string());
+            unreachable("unhandled!");
+          }
+        }
         case; {
           print("%\n", msg);
         }
@@ -343,6 +369,17 @@ get :: (json_val: JSON_Value, key: string, expected_type: JSON_Type) -> JSON_Val
   return val, success;
 }
 
+new_io_pipe_read_event :: (uring: *IO_Uring) -> *IO_Uring_SQE {
+  file_read_op := New(IO_File_Read);
+  file_read_op.* = .{
+    type = IO_File_Read,
+    from = .{},
+    buf = xx alloc_string(4),
+  };
+  sqe := uring_op_read(uring, read_fd, file_read_op.buf, xx file_read_op); assert(sqe != null);
+  assert(sqe != null);
+  return sqe;
+}
 new_io_stdin_read_event :: (uring: *IO_Uring) -> *IO_Uring_SQE {
   // @perf
   file_read_op := New(IO_File_Read);
@@ -377,6 +414,7 @@ on_ice_candidate_cb :: (pc: *Peer_Connection(*IO_Uring), candidate: *Ice_Candida
   sb: String_Builder;
   as_str := to_chrome_ice_candidate_shit(*sb, candidate,, allocator = temp);
   print("%\n",as_str);
+  // write_to_fifo(write_fd, as_str);
 
   buf := cast([]u8) alloc_string(MTU);
   hdr := create_msghdr(buf);
@@ -397,10 +435,58 @@ set_pp :: () {
   context.print_style.default_format_struct.draw_type_name = true;
   context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = -1;
   context.print_style.default_format_struct.use_newlines_if_long_form = true;
+  // context.print_style.default_format_array.separator = " ";
 }
+
+read_exact :: (fd: s32, data: string) -> bool {
+  total := 0;
+  while total < data.count {
+    remaining := data.count - total;
+    n := read(fd, data.data + total, xx remaining);
+    if n < 0 {
+      if errno() == EINTR continue;
+      assert(false, "oh heall naww");
+    }
+    if n == 0 return false;
+    total += n;
+  }
+  return true;
+}
+
+write_exact :: (fd: s32, data: string) -> bool {
+  total := 0;
+  while total < data.count {
+    remaining := data.count - total;
+    n := write(fd, data.data + total, xx remaining);
+    if n < 0 {
+      if errno() == EINTR continue;
+      assert(false, "oh heall naww");
+    }
+    if n == 0 return false;
+    total += n;
+  }
+  return true;
+}
+
+write_to_fifo :: (fifo: s32, content: string) {
+  ret := write(fifo, *cast(u32)content.count, 4);
+  assert(ret != -1);
+  ok := write_exact(fifo, content);
+  assert(ok);
+}
+write_fd: s32;
+read_fd: s32;
 
 main :: () {
   set_pp();
+  fifo_write_path := temp_c_string("/tmp/go_pipe");
+  fifo_read_path := temp_c_string("/tmp/jai_pipe");
+  write_fd = open(fifo_write_path, O_RDWR);
+  assert(write_fd != -1);
+
+  read_fd = open(fifo_read_path, O_RDONLY);
+  assert(write_fd != -1);
+
   params: IO_Uring_Params;
   uring := New(IO_Uring);
   err := uring_init(uring, *params);
@@ -420,7 +506,7 @@ main :: () {
   // this should be internal to peerconnection after we have set the local description
   gather_local_candidates(*pc);
 
-  new_io_stdin_read_event(uring);
+  new_io_pipe_read_event(uring);
   new_io_timeout_event(uring, Time_Spec.{1,0}, *pc);
 
 
@@ -465,7 +551,13 @@ main :: () {
             continue;
           }
           file_read := cast(*IO_File_Read) kind;
-          line: string = xx array_view(file_read.buf, 0, it.res);
+          size: []u8 = array_view(file_read.buf, 0, it.res);
+          sz: = bytes_to_int(size, s64);
+          line := alloc_string(sz);
+          print("reading \n");
+          prev_ok := read_exact(read_fd, line); assert(prev_ok);
+          print("line %\n", line);
+
           ok, root := json_parse_string(line);
           assert(ok, tprint("not a valid json '%'\n", line));
           sdp:, ok = get(root, "sdp", .STRING);
@@ -485,7 +577,7 @@ main :: () {
             // figure out all the bs with the component id shit bru
             assert(pc.check_list.pairs.count != 0);
           }
-          sqe := uring_op_read(uring, STDIN_FILENO, file_read.buf, xx file_read);
+          sqe := uring_op_read(uring, read_fd, file_read.buf, xx file_read);
           assert(sqe != null);
 
         case IO_Timeout(*IO_Uring);
