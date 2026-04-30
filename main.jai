@@ -1,4 +1,5 @@
 #import "Basic";
+#import "String";
 #import "SRTP";
 #import "utils";
 #import "Compiler";
@@ -201,23 +202,9 @@ do_connectivity_check_for_pair :: (pc: *Peer_Connection(*IO_Uring)) {
 
 // @todo hash_algo looks ass
 verify_cert :: (cert: *DTLS_Certificate, fingerprint: DTLS_Certificate_Fingerprint) -> bool {
-  _create_fingerprint :: (cert_hashed: []u8) -> string {
-    builder := String_Builder.{allocator = temp};
-    for cert_hashed {
-      if (it >> 4) & 0xf == 0 print_to_builder(*builder, "0%", formatHex(it));
-      else print_to_builder(*builder, "%", formatHex(it));
-      if it_index != cert_hashed.count -1  {
-        print_to_builder(*builder, ":");
-      }
-    }
-    str := builder_to_string(*builder);
-    to_upper_in_place(str);
-    return str;
-  }
   fp := fingerprint;
   if equal(fp.hash_algorithm, "sha-256") {
-    cert_hashed := sha256(cert.cert);
-    cert_fingerprint := _create_fingerprint(cert_hashed);
+    cert_fingerprint := dtls_certificate_create_fingerprint(cert);
     if equal(cert_fingerprint, fingerprint.hash) {
       return true;
     } else {
@@ -240,13 +227,21 @@ send_dtls_client_hello :: (dtls_ctx: *DTLS_Context, cookie: []u8, conn: Socket_C
 }
 
 handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uring), from: Socket_Address, buf: []u8) {
+  dtls_ctx := *pc.dtls_ctx;
+  if dtls_ctx.state == .FINISHED return; // ignore all other dtls messages
+  
   mut_buf := buf;
   conn := read_ctx.sock_conn;
   to := from;
   deser_bytes := 0;
-  dtls_ctx := *pc.dtls_ctx;
   while mut_buf.count > 0 {
-    msg:, deser_bytes = dtls_message_deserialize(mut_buf);
+    temp_buf: []u8 = xx copy_string(xx mut_buf);
+    msg, raw := dtls_message_deserialize(temp_buf);
+    // raw := dtls_message_raw_clone(raw_view);
+
+    if dtls_ctx.flight == 4 array_add(*dtls_ctx.flight4_messages, raw);
+    deser_bytes = raw.size;
+
     defer mut_buf = array_view(mut_buf, deser_bytes);
 
     if dtls_ctx.role == .SERVER {
@@ -263,6 +258,12 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
             reply := dtls_message_server_hello(dtls_ctx, msg, .[srtp_ext]);
             dtls_message_send(dtls_ctx, reply, conn, to);
 
+            // ServerHello
+            // Certificate*
+            // ServerKeyExchange*
+            // CertificateRequest*
+            // ServerHelloDone
+
             reply = dtls_message_server_hello_done(dtls_ctx);
             dtls_message_send(dtls_ctx, reply, conn, to);
         }
@@ -270,6 +271,7 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
     } else {
       if msg.header.kind == {
         case .HELLO_VERIFY_REQUEST; {
+          dtls_ctx.flight = 4;
           ok, cookie := dtls_message_get_cookie(msg); assert(ok);
           // @leak??
           dtls_ctx.cookie = xx copy_string(xx cookie);
@@ -311,6 +313,121 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
             log_err("failed to verify signature of DTLSServerKeyExchange %\n",SSL_error_string());
             unreachable("unhandled!");
           }
+          dtls_ctx.session_keying_material.remote_public_key = key_exch.key_params.public_key;
+        }
+        case .CERTIFICATE_REQUEST; {
+        }
+        case .SERVER_HELLO_DONE; {
+          log_info("got server done message or smth like that bru\n");
+
+          // send ceritifacte
+          msg_certificate := dtls_message_certificate(dtls_ctx, .{certs = DTLS_CERTIFICATES});
+          dtls_message_send(dtls_ctx, msg_certificate, conn, to);
+
+          // send key and shi
+          msg_key_exch := dtls_message_client_key_exch(dtls_ctx);
+          dtls_message_send(dtls_ctx, msg_key_exch, conn, to);
+
+          // send certificate verity
+          private_key := dtls_certificate_private_key(dtls_ctx).key; assert(private_key != null);
+          
+          signer := evp_digest_sign_init(private_key);
+
+          for dtls_ctx.flight4_messages {
+            evp_digest_sign_update(signer, it.header);
+            evp_digest_sign_update(signer, it.payload);
+          }
+
+          sum_size := evp_digest_sign_final(signer); assert(sum_size > 0, tprint("%\n", sum_size));
+
+          signature: []u8 = xx alloc_string(sum_size);
+          evp_digest_sign_final(signer, signature);
+
+          cert_verify := dtls_message_certificate_verify(dtls_ctx, signature);
+          dtls_message_send(dtls_ctx, cert_verify, conn, to);
+
+          // change cipher specs
+          cipher_spec := dtls_message_change_cipher_spec(dtls_ctx);
+          dtls_message_send(dtls_ctx, cipher_spec, conn, to);
+
+          // generate master key for finish
+          keying_material := dtls_get_session_keying_material(dtls_ctx);
+          remote_key := evp_key_deserialize(keying_material.remote_public_key); assert(remote_key != null);
+          premaster_key := derive_shared_secret_key(keying_material.key, remote_key);
+          master_key := generate_master_key(dtls_ctx.ctx_random, dtls_ctx.remote_last_random, xx premaster_key);
+          dtls_ctx.session_keying_material.master_key = master_key;
+          key_blk := dtls_get_key_block(dtls_ctx);
+          explicit_iv: []u8 = xx alloc_string(8);
+          seq64: u64 = ((cast(u64)(dtls_ctx.epoch + 1)) << 48) | (dtls_ctx.seq_no.second + 1);
+          (explicit_iv.data).(*u64).* = BYTE_SWAP(seq64);
+
+          iv: []u8 = xx join(xx key_blk.client_write_IV, xx explicit_iv,, allocator = temp);
+          encrypt_ctx := aes128_gcm_ctx_init(key_blk.client_write_key, iv);
+
+          // @todo refactor this shit bro please
+
+
+          // @todo based on cipher suite instead of hard coding
+          // @todo this is redundany as we are doing something similar for certificate verify
+          sha_ctx := sha256_init();
+
+          for dtls_ctx.flight4_messages {
+            // if it.header.data.(*DTLS_Handshake_Kind).* == .SERVER_HELLO ||
+            // it.header.data.(*DTLS_Handshake_Kind).* == .CLIENT_HELLO ||
+            // it.header.data.(*DTLS_Handshake_Kind).* == .FINISHED {
+              sha256_update(*sha_ctx, it.header);
+              if it.payload.count > 0 sha256_update(*sha_ctx, it.payload);
+            // }
+          }
+
+          msg_hash := sha256_final(*sha_ctx);
+          
+
+          dtls_ctx.epoch += 1;
+
+          // @note Any cipher suite which does not explicitly specify
+          // verify_data_length has a verify_data_length equal to 12.
+          verify_data: []u8 = xx PRF(xx master_key, xx "client finished", xx msg_hash, 12);
+
+
+          finish_as_msg := dtls_message_finish(dtls_ctx, verify_data);
+          temp_ := DTLS_Cipher_Temp.{
+            header = finish_as_msg.header,
+            content = verify_data,
+          };
+
+          temp_ser := serialize(temp_);
+
+          associated_data := generate_additional_data(finish_as_msg.record);
+
+          aes128_gcm_add_associated_data(encrypt_ctx, array_view(associated_data, 0));
+          // encrypted write
+
+
+          msg_blk := aes128_gcm_encrypt(encrypt_ctx, temp_ser);
+          rest, tag := aes128_gcm_encrypt_finish(encrypt_ctx);
+
+          without_tag := join(xx msg_blk, xx rest);
+          print("original %\n", cast([]u8)temp_ser);
+          print("encrypted %\n", cast([]u8)without_tag);
+          print("tag %\n", cast([]u8)xx tag);
+
+          za_message := join(xx msg_blk, xx rest, xx tag);
+
+          ciphered := DTLS_AEAD_Cipher.{
+            nonce_explicit = explicit_iv,
+            content = xx za_message,
+          };
+
+          // @todo @priority this should be added as additional data
+          finish := dtls_cipher_text_finish(dtls_ctx, ciphered);
+          as_bytes := dtls_cipher_text_send(dtls_ctx, finish, conn, to);
+
+          // @todo we only care about the happy path we assume that the connection has created
+          // and we ignore the dtls messages after this cause i ain't implementing all that
+
+          dtls_ctx.state = .FINISHED;
+
         }
         case; {
           print("%\n", msg);
@@ -435,7 +552,8 @@ set_pp :: () {
   context.print_style.default_format_struct.draw_type_name = true;
   context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = -1;
   context.print_style.default_format_struct.use_newlines_if_long_form = true;
-  // context.print_style.default_format_array.separator = " ";
+  context.print_style.default_format_array.separator = " ";
+  context.print_style.default_format_array.stop_printing_after_this_many_elements = -1;
 }
 
 read_exact :: (fd: s32, data: string) -> bool {
@@ -482,10 +600,10 @@ main :: () {
   fifo_write_path := temp_c_string("/tmp/go_pipe");
   fifo_read_path := temp_c_string("/tmp/jai_pipe");
   write_fd = open(fifo_write_path, O_RDWR);
-  assert(write_fd != -1);
+  assert(write_fd != -1, "please run go program first");
 
   read_fd = open(fifo_read_path, O_RDONLY);
-  assert(write_fd != -1);
+  assert(write_fd != -1,  "please run go program first");
 
   params: IO_Uring_Params;
   uring := New(IO_Uring);
@@ -554,9 +672,8 @@ main :: () {
           size: []u8 = array_view(file_read.buf, 0, it.res);
           sz: = bytes_to_int(size, s64);
           line := alloc_string(sz);
-          print("reading \n");
           prev_ok := read_exact(read_fd, line); assert(prev_ok);
-          print("line %\n", line);
+          print("read line: '%'\n", line);
 
           ok, root := json_parse_string(line);
           assert(ok, tprint("not a valid json '%'\n", line));

@@ -9,6 +9,13 @@ Bytes_Writer :: struct {
   should_swap: bool;
 };
 
+bytes_writer_new :: (buf: []u8) -> Bytes_Writer {
+  return .{
+    bytes = buf,
+    should_swap = true,
+  };
+}
+
 write_bytes :: (using writer: *Bytes_Writer, data: $T) {
   assert(cursor - 1 + size_of(T) <= bytes.count);
   _data := data;
@@ -180,6 +187,7 @@ random_bytes :: (bytes: *[]u8) #expand {
   }
 }
 
+
 unreachable :: (fmt: string, args: ..Any) #expand {
   builder: String_Builder;
   print_to_builder(*builder, fmt, ..args,, allocator = temp);
@@ -213,3 +221,4 @@ big_endian :: () -> bool #expand {
 #import "POSIX";
 #import "Linux";
 #import "Socket";
+#import "String";

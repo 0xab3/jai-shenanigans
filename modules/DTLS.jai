@@ -1,38 +1,74 @@
-DTLS_VERSION_1_2 :: DTLS_Protocol_Version.{0xfe, 0xfd}; // dtls version 1.2
+DTLS_VERSION_1_2 :: DTLS_Protocol_Version.{0xfe, 0xfd}; // we only support 1.2
 DTLS_VERSION_1_0 :: DTLS_Protocol_Version.{0xfe, 0xff};
 
-TLS_RSA_WITH_AES_128_CBC_SHA             ::  DTLS_Cipher_Suite.{0x00,   0x2f};
+// TLS_RSA_WITH_AES_128_CBC_SHA             ::  DTLS_Cipher_Suite.{0x00,   0x2f};
 TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256  ::  DTLS_Cipher_Suite.{0xc0,   0x2b};
-TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256    ::  DTLS_Cipher_Suite.{0xc0,   0x2f};
-TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA     ::  DTLS_Cipher_Suite.{0xc0,   0x0a};
-TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA       ::  DTLS_Cipher_Suite.{0xc0,   0x14};
-TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384  ::  DTLS_Cipher_Suite.{0xc0,   0x2c};
-TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384    ::  DTLS_Cipher_Suite.{0xc0,   0x30};
+// TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256    ::  DTLS_Cipher_Suite.{0xc0,   0x2f};
+// TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA     ::  DTLS_Cipher_Suite.{0xc0,   0x0a};
+// TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA       ::  DTLS_Cipher_Suite.{0xc0,   0x14};
+// TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384  ::  DTLS_Cipher_Suite.{0xc0,   0x2c};
+// TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384    ::  DTLS_Cipher_Suite.{0xc0,   0x30};
 
 
 
 DTLS_SUPPORTED_CIPHER_SUITES :: DTLS_Cipher_Suite.[
-   // TLS_RSA_WITH_AES_128_CBC_SHA,
   TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-  // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-  // TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
-  // TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-  // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-  // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 ];
 
 DTLS_SUPPORTED_COMPRESSION_METHODS :: DTLS_Compression_Method.[
   .NULL
 ];
 
+// @todo create fingerprint here for sdp
+DTLS_CERTIFICATE :: #run () -> DTLS_Certificate {
+  filename := "cert.der";
+  contents, ok := read_entire_file(filename);
+  assert(ok, tprint("failed to read file %",ok));
+  return .{
+    cert = xx contents,
+  };
+
+}();
+
+dtls_certificate_private_key :: (ctx: *DTLS_Context) -> Crypto_Key {
+  if ctx.local_cert_privkey.key == null {
+    filename := temp_c_string("key.der");
+    fp := fopen(filename, "r");
+    assert(fp != null);
+    pkey := d2i_PrivateKey_fp(fp, null);
+    assert(pkey != null);
+    ctx.local_cert_privkey = .{pkey};
+  }
+  return ctx.local_cert_privkey;
+}
+
+DTLS_CERTIFICATES :: DTLS_Certificate.[DTLS_CERTIFICATE];
+
+DTLS_Message_Raw :: struct {
+  size: s64;
+  entire: []u8;
+  record: []u8;
+  header: []u8;
+  payload: []u8;
+}
+
 DTLS_Context :: struct {
   role: enum {CLIENT; SERVER;};
+  flight: u8 = 1;
   cookie: []u8;
+  epoch: u16;
   seq_no: Pair(u32, u16);
   local_cert : DTLS_Certificate;
+  local_cert_privkey: Crypto_Key;
   remote_cert: DTLS_Certificate;
   ctx_random: DTLS_Random;
   remote_last_random: DTLS_Random; // we need this for signature validation
+
+  session_keying_material: Epheremal_Key;
+  key_block: DTLS_Key_Block;
+  flight4_messages: [..]DTLS_Message_Raw; // technically only flight4 messages
+
+  state: enum { IN_PROGRESS; FINISHED; } = .IN_PROGRESS;
 };
 
 operator + :: (x: Pair(u32, u16), y: s64) -> Pair(u32, u16) {
@@ -108,9 +144,37 @@ DTLS_Record :: struct {
   length: u16; @Size @2 // length of the Handshake header + value
 };
 
+DTLS_Key_Block :: struct {
+  // client_write_mac_key: []u8; // unused
+  // server_write_mac_key: []u8; // unused
+  client_write_key: []u8; // 16
+  server_write_key: []u8; // 16
+  client_write_IV : []u8; // 4
+  server_write_IV : []u8; // 4
+  entire: []u8; // dynamic ig?
+}
+
+// @todo this is not generic at all
+DTLS_AEAD_Cipher :: struct {
+  nonce_explicit: []u8; @Array @8 // AES_GCM_IV_SIZE but we only need the explicit part
+  content: []u8; @Vla @0
+};
+
+// @todo this should have multiple ciphers not just stream cipher
+DTLS_Cipher_Text :: struct {
+  record: DTLS_Record;
+  aead: DTLS_AEAD_Cipher;
+};
+DTLS_Cipher_Temp :: struct {
+  header: DTLS_Handshake_Header; @InnerSize
+  content: []u8; @Vla @0
+}
+
 DTLS_RECORD_SIZE :: #run dtls_message_get_size(DTLS_Record);
+#assert DTLS_RECORD_SIZE == 13;
 
 DTLS_Handshake_Header :: struct {
+  _:void; @Size @12
   kind: DTLS_Handshake_Kind; @DefaultSize
   length: u32; @Array @3
   message_seq: u16; @DefaultSize
@@ -118,6 +182,7 @@ DTLS_Handshake_Header :: struct {
   fragment_length: u32; @Array @3
 };
 DTLS_HANDSHAKE_HEADER_SIZE :: #run dtls_message_get_size(DTLS_Handshake_Header);
+#assert DTLS_HANDSHAKE_HEADER_SIZE == 12;
 
 DTLS_Client_Hello :: struct {
   client_version := DTLS_VERSION_1_2; @InnerSize
@@ -150,7 +215,7 @@ DTLS_Hash_Algorithm :: enum u8 {
   SHA512  ::  6;
 };
 
-DTLS_Signature_Algorithmm :: enum u8 {
+DTLS_Signature_Algorithm :: enum u8 {
   ANONYMOUS  ::  0;
   RSA        ::  1;
   DSA        ::  2;
@@ -170,6 +235,7 @@ DTLS_Signature_Hash_Algorithms :: struct {
 };
 SIGNATURE_ALGORITHM_RSA_PKCS1_SHA256 :: DTLS_Signature_Hash_Algorithm.{ 0x04, 0x01 };
 SIGNATURE_ALGORITHM_ED25519 :: DTLS_Signature_Hash_Algorithm.{ 0x08, 0x07 };
+SIGNATURE_ALGORITHM_ECDSA_SECP256R1_SHA256 :: DTLS_Signature_Hash_Algorithm.{0x04, 0x03};
 
 
 DTLS_ECCurveType :: enum u8 {
@@ -204,7 +270,7 @@ DTLS_ECDHParams :: struct {
 
 
 DTLS_Server_Hello :: struct {
-  server_version := DTLS_VERSION_1_0; @InnerSize // 1.0 
+  server_version := DTLS_VERSION_1_0; @InnerSize
   random: DTLS_Random; @InnerSize
   session_id: []u8; @Vla @1
   cipher_suite: DTLS_Cipher_Suite; @DefaultSize
@@ -233,14 +299,26 @@ DTLS_Hello_Request :: struct {};
 
 DTLS_Certificate :: struct {
   cert :[]u8; @Vla @3
-}
+};
 
-Public_Key :: struct {
+Epheremal_Key :: struct {
+  using #as ours: Asymmetric_Key; // @todo remove the using shit
+  remote_public_key: []u8;
+  master_key: []u8;
+};
+
+Asymmetric_Key :: struct {
+  key: *EVP_PKEY;
+  public_key: []u8; // serialized
+};
+
+Crypto_Key :: struct {
   key: *EVP_PKEY;
 };
 
+
 DTLS_Certificate_List :: struct {
-  certs :[]DTLS_Certificate; @Vla @3
+  certs: []DTLS_Certificate; @Vla @3
 }
 // DTLS_Server_Key_Exchange :: struct {
 //   select (KeyExchangeAlgorithm) {
@@ -263,14 +341,34 @@ DTLS_Certificate_List :: struct {
 //   };
 // } ;
 
+DTLS_Client_Key_Exchange :: struct {
+  ecdh_Yc: []u8; @Vla @1
+};
+
+DTLS_Certificate_Verify :: struct {
+  sign_algo: DTLS_Signature_Hash_Algorithm; @InnerSize
+  signature: []u8; @Vla @2
+}
+
+DTLS_Change_Cipher_Spec :: struct {
+  inner: u8 = 1; @DefaultSize
+}
+
+DTLS_Message_Finish :: struct {
+  verify_data: []u8; @Array @12
+};
 
 DTLS_Handshake_Value :: Tagged_Union(
   DTLS_Hello_Request,
   DTLS_Client_Hello,
   DTLS_Hello_Verify,
   DTLS_Server_Hello,
+  DTLS_Certificate_Verify,
+  DTLS_Change_Cipher_Spec,
+  DTLS_Message_Finish,
   DTLS_Server_Hello_Done,
 );
+
 
 DTLS_Handshake_Message :: struct {
   record: DTLS_Record;
@@ -278,9 +376,47 @@ DTLS_Handshake_Message :: struct {
   value: DTLS_Handshake_Value;
 };
 
-_deserialize :: (reader: *Bytes_Reader, x: *Any, size_notes_ommitable := false, caller_loc := #caller_location) { 
+#run {
+  contents, ok := read_entire_file("cert.der"); assert(ok);
+  fp := dtls_certificate_create_fingerprint(.{ xx contents });
+  print("%\n", fp);
+}
+
+dtls_get_finish_label :: (ctx: *DTLS_Context) -> string {
+  if ctx.role == .CLIENT return "client finished";
+  return "server finished";
+  
+}
+dtls_get_session_keying_material :: (ctx: *DTLS_Context) -> Epheremal_Key {
+  if ctx.session_keying_material.key == null {
+    ctx.session_keying_material.key = generate_ephemeral_ec_key();
+    ctx.session_keying_material.public_key = evp_key_serialize_public_key(ctx.session_keying_material.key);
+    assert(ctx.session_keying_material.public_key.count > 0);
+  }
+  return ctx.session_keying_material;
+}
+generate_additional_data :: (record: DTLS_Record) -> [DTLS_RECORD_SIZE]u8 {
+  out: [DTLS_RECORD_SIZE]u8;
+
+  writer := bytes_writer_new(array_view(out,0));
+
+  write_bytes(*writer, record.epoch);
+  write_bytes(*writer, record.seq_no.first);
+  write_bytes(*writer, record.seq_no.second);
+  write_bytes(*writer, record.kind);
+  write_bytes(*writer, record.version.major);
+  write_bytes(*writer, record.version.minor);
+  write_bytes(*writer, record.length);
+
+  return out;
+
+}
+
+//returns the bytes that we have deserialized
+_deserialize :: (reader: *Bytes_Reader, x: *Any, size_notes_ommitable := false, caller_loc := #caller_location) -> orign: []u8 { 
   if x.type.(*Type_Info).type != .STRUCT unreachable("only supports struct given %\n", x.type);
   x_type := cast(*Type_Info_Struct)x.type; 
+  start := reader.cursor;
 
   for x_type.members {
     notes := it.notes;
@@ -344,8 +480,7 @@ _deserialize :: (reader: *Bytes_Reader, x: *Any, size_notes_ommitable := false, 
           bytes_read += end - start;
         }
         // malformed packet
-        log_debug("read % bytes while sz was %\n", bytes_read, sz);
-        if bytes_read > sz unreachable("oh healll nawww!");
+        if bytes_read > sz unreachable("oh healll nawww! read % bytes while sz was %\n", bytes_read, sz);
         vla_as_array := array_start_ptr.(*[]u8);
         vla_as_array.count = read_array.count;
         // @leak
@@ -372,7 +507,7 @@ _deserialize :: (reader: *Bytes_Reader, x: *Any, size_notes_ommitable := false, 
       } else if it.type.type == .ARRAY {
         as_array_type_info := it.type.(*Type_Info_Array);
         array_kind := as_array_type_info.array_type;
-        if array_kind != .FIXED unreachable("only fixed array is supported given % in %.%\n",array_kind, x_type.name, it.name);
+        // if array_kind != .FIXED unreachable("only fixed array is supported given % in %.%\n",array_kind, x_type.name, it.name);
 
         count, data := get_array_count_and_data(x.value_pointer.(*u8) + it.offset_in_bytes, as_array_type_info);
         assert(count >= sz, tprint("array_count % is less than @Size % for %.%\n", count, sz, x_type.name, it.name));
@@ -383,64 +518,84 @@ _deserialize :: (reader: *Bytes_Reader, x: *Any, size_notes_ommitable := false, 
       unreachable("failed to deserialize message %.% has unknown notes %!\n", x_type.name, it.name, notes);
     }
   }
+  return array_view(reader.bytes, start, reader.cursor - start);
 }
 
-_dtls_value_deserialize :: (reader: *Bytes_Reader, kind: DTLS_Handshake_Kind) -> DTLS_Handshake_Value {
+_dtls_value_deserialize :: (reader: *Bytes_Reader, kind: DTLS_Handshake_Kind) -> DTLS_Handshake_Value, []u8 {
   value := DTLS_Handshake_Value.{};
+  orig_bytes: []u8;
   if kind == {
     case .HELLO_REQUEST; {
       set(*value, DTLS_Hello_Request.{});
     }
     case .CLIENT_HELLO; {
       serialized: DTLS_Client_Hello;
-      _deserialize(reader, *to_any(*serialized));
+      orig_bytes = _deserialize(reader, *to_any(*serialized));
       set(*value, serialized);
     }
     case .SERVER_HELLO; {
       serialized: DTLS_Server_Hello;
-      _deserialize(reader, *to_any(*serialized));
+      orig_bytes = _deserialize(reader, *to_any(*serialized));
       set(*value, serialized);
     }
     case .HELLO_VERIFY_REQUEST; {
       serialized: DTLS_Hello_Verify;
-      _deserialize(reader, *to_any(*serialized));
+      orig_bytes = _deserialize(reader, *to_any(*serialized));
       set(*value, serialized);
     }
     case .SERVER_HELLO_DONE; {
       serialized: DTLS_Server_Hello_Done;
-      _deserialize(reader, *to_any(*serialized));
+      orig_bytes = _deserialize(reader, *to_any(*serialized));
       set(*value, serialized);
     }
     case .CERTIFICATE; {
       serialized: DTLS_Certificate_List;
-      _deserialize(reader, *to_any(*serialized));
+      orig_bytes = _deserialize(reader, *to_any(*serialized));
       set(*value, serialized);
     }
     case .SERVER_KEY_EXCHANGE; { 
       serialized: DTLS_ECDHParams;
-      _deserialize(reader, *to_any(*serialized));
+      orig_bytes = _deserialize(reader, *to_any(*serialized));
       set(*value, serialized);
     }
     case .CERTIFICATE_REQUEST; {
+      // @todo handle this
+    }
+    case .FINISHED; {
+      serialized: DTLS_Message_Finish;
+      serialized.verify_data = xx alloc_string(12);
+      orig_bytes = _deserialize(reader, *to_any(*serialized));
+      set(*value, serialized);
     }
     case; unreachable("% deserialize is not implemented!", kind);
   }
-  return value;
+  return value, orig_bytes;
 }
 
-dtls_message_deserialize :: (buf: []u8) -> DTLS_Handshake_Message, s64 {
+dtls_message_deserialize :: (buf: []u8) -> DTLS_Handshake_Message, DTLS_Message_Raw {
   reader := Bytes_Reader.{ bytes = buf };
   record: DTLS_Record;
   hdr: DTLS_Handshake_Header;
-  _deserialize(*reader, *to_any(*record));
-  _deserialize(*reader, *to_any(*hdr));
-  value := _dtls_value_deserialize(*reader, hdr.kind);
+  bytes_rec := _deserialize(*reader, *to_any(*record));
+  bytes_hdr := _deserialize(*reader, *to_any(*hdr));
+  value, bytes_val := _dtls_value_deserialize(*reader, hdr.kind);
+
+  // @todo remove this shit 
+  if hdr.kind == .CERTIFICATE_REQUEST { 
+    assert(bytes_val.count == 0);
+    bytes_val = array_view(reader.bytes, reader.cursor, hdr.length);
+    reader.cursor += bytes_val.count;
+  }
+
   msg := DTLS_Handshake_Message.{
     record = record,
     header = hdr,
     value = value,
   };
-  return msg, reader.cursor;
+
+  entire_msg_bytes := array_view(buf, 0, reader.cursor);
+
+  return msg, .{ reader.cursor, entire_msg_bytes, bytes_rec, bytes_hdr, bytes_val };
 }
 
 dtls_handsake_record_default :: (seq_no: Pair(u32,u16)) -> DTLS_Record {
@@ -463,16 +618,39 @@ dtls_handshake_header_default :: (kind: DTLS_Handshake_Kind, message_seq: u16) -
   };
 }
 
+dtls_message_make :: (ctx: *DTLS_Context, kind: DTLS_Handshake_Kind, msg_len: s64) -> DTLS_Record, DTLS_Handshake_Header {
+  record := dtls_handsake_record_default(ctx.seq_no);
+  record.epoch = ctx.epoch;
+  record.length = cast(u16)(DTLS_HANDSHAKE_HEADER_SIZE + msg_len);
+  header := dtls_handshake_header_default(kind, ctx.seq_no.second); // chat is this right?
+  header.fragment_length = record.length - DTLS_HANDSHAKE_HEADER_SIZE;
+  header.length = record.length - DTLS_HANDSHAKE_HEADER_SIZE;
+  return record, header;
+}
+
+
+
+dtls_message_certificate :: (ctx: *DTLS_Context, cert_list: DTLS_Certificate_List) -> DTLS_Handshake_Message {
+  value_size := dtls_message_get_size(DTLS_Certificate_List, cert_list.certs);
+  record, header := dtls_message_make(ctx, .CERTIFICATE, value_size);
+
+  value: DTLS_Handshake_Value;
+  set(*value, cert_list);
+
+  msg := DTLS_Handshake_Message.{
+    record = record,
+    header = header,
+    value = value,
+  };
+
+  return msg;
+}
 dtls_message_client_hello :: (ctx: *DTLS_Context, session_id: []u8, cookie: []u8, cipher_suites: []DTLS_Cipher_Suite, comp_methods: []DTLS_Compression_Method, exts: []DTLS_Extension) -> DTLS_Handshake_Message {
 
   // is this session based chat???
   if ctx.ctx_random.gmt_unix_time == 0 ctx.ctx_random = .{ _get_gm_time(), random_n_bytes(28) };
-  record := dtls_handsake_record_default(ctx.seq_no);
   value_size := dtls_message_get_size(DTLS_Client_Hello, session_id, cookie, cipher_suites, comp_methods, exts);
-  record.length = cast(u16)(DTLS_HANDSHAKE_HEADER_SIZE + value_size);
-  header := dtls_handshake_header_default(.CLIENT_HELLO, ctx.seq_no.second);
-  header.fragment_length = record.length - DTLS_HANDSHAKE_HEADER_SIZE;
-  header.length = record.length - DTLS_HANDSHAKE_HEADER_SIZE;
+  record, header := dtls_message_make(ctx, .CLIENT_HELLO, value_size);
 
 
   value: DTLS_Handshake_Value;
@@ -499,16 +677,247 @@ dtls_message_prep_client_hello :: (ctx: *DTLS_Context, session_id: []u8, cookie:
   return dtls_message_client_hello(ctx, session_id, cookie, DTLS_SUPPORTED_CIPHER_SUITES, DTLS_SUPPORTED_COMPRESSION_METHODS, extra_ext);
 }
 
+dtls_message_client_key_exch :: (ctx: *DTLS_Context) -> DTLS_Handshake_Message {
+  eph_key := dtls_get_session_keying_material(ctx);
+  epkey := eph_key.public_key;
+
+  value_size := dtls_message_get_size(DTLS_Client_Key_Exchange, epkey);
+  record, header := dtls_message_make(ctx, .CLIENT_KEY_EXCHANGE, value_size);
+  
+  value: DTLS_Handshake_Value;
+  key_exch := DTLS_Client_Key_Exchange.{ epkey };
+  set(*value, key_exch);
+
+  msg := DTLS_Handshake_Message.{
+    record = record,
+    header = header,
+    value = value,
+  };
+  return msg;
+}
+
+
+// @todo signature is redundant
+dtls_message_certificate_verify :: (ctx: *DTLS_Context, signature: []u8) -> DTLS_Handshake_Message {
+  value_size := dtls_message_get_size(DTLS_Certificate_Verify, signature);
+  record, header := dtls_message_make(ctx, .CERTIFICATE_VERIFY, value_size);
+
+  value: DTLS_Handshake_Value;
+  cert_verify := DTLS_Certificate_Verify.{
+    sign_algo =  SIGNATURE_ALGORITHM_ECDSA_SECP256R1_SHA256,
+    signature = signature,
+  };
+  set(*value, cert_verify);
+
+  msg := DTLS_Handshake_Message.{
+    record = record,
+    header = header,
+    value = value,
+  };
+  return msg;
+}
+
+
+dtls_message_change_cipher_spec :: (ctx: *DTLS_Context) -> DTLS_Handshake_Message {
+  record := DTLS_Record.{
+    kind = .CHANGE_CIPHER_SPEC,
+    version = DTLS_VERSION_1_2,
+    epoch = 0,
+    seq_no = ctx.seq_no,
+    length = 1,
+  };
+
+  value: DTLS_Handshake_Value;
+  cipher_specs := DTLS_Change_Cipher_Spec.{};
+
+  set(*value, cipher_specs);
+
+  return .{
+    record = record,
+    header = dtls_handshake_header_default(.HELLO_REQUEST, 0), // sm bs handshake
+    value = value,
+  };
+}
+
+A_SHA256 :: (secret: string, seed: string, iter: s64) -> string {
+  // A() is defined as:
+
+  // A(0) = seed
+  // A(i) = HMAC_hash(secret, A(i-1))
+  if iter == 0 return seed;
+  return hmac_sha256(secret, A_SHA256(secret, seed, iter - 1));
+
+}
+
+P_SHA256 :: (secret: string, seed: string, output_length: s64) -> string {
+
+  // HMAC_hash(secret, A(1) + seed) +
+  // HMAC_hash(secret, A(2) + seed) +
+  // HMAC_hash(secret, A(3) + seed) + ...
+
+  final := "";
+  n_iter := cast(s64)ceil(output_length.(float) / 32.);
+
+  for 1..n_iter {
+    final = join(final, hmac_sha256(secret, join(A_SHA256(secret, seed, it), seed)));
+  }
+
+  return slice(final, 0, output_length);
+}
+Random_Struct :: struct {
+  client_random: DTLS_Random; @InnerSize
+  server_random: DTLS_Random; @InnerSize
+}
+dtls_get_key_block :: (using dtls_ctx: *DTLS_Context) ->  DTLS_Key_Block {
+  if key_block.entire.count == 0 {
+    assert(session_keying_material.master_key.count != 0);
+    return dtls_generate_key_block(dtls_ctx, xx session_keying_material.master_key, ctx_random, remote_last_random);
+  }
+  return key_block;
+}
+
+dtls_generate_key_block :: (dtls_ctx: *DTLS_Context, master_secret: string, client_random: DTLS_Random, server_random: DTLS_Random) -> DTLS_Key_Block {
+  random := Random_Struct.{ server_random, client_random };
+  randoms_as_bytes := serialize(random,, allocator = temp);
+  key_block_as_bytes: []u8 = xx PRF(master_secret, "key expansion", xx randoms_as_bytes, 40);
+
+  key_block := DTLS_Key_Block.{
+    client_write_key = xx array_view(key_block_as_bytes, 0, 16),
+    server_write_key = xx array_view(key_block_as_bytes, 16, 16),
+    client_write_IV  = xx array_view(key_block_as_bytes, 32,  4),
+    server_write_IV  = xx array_view(key_block_as_bytes, 36,  4),
+    entire = key_block_as_bytes,
+  };
+  dtls_ctx.key_block = key_block;
+
+  return key_block;
+}
+
+PRF :: (secret: string, label: string, seed: string, output_length: s64) -> string {
+  // @todo based one the value from cipher suites
+  return copy_string(P_SHA256(secret, join(label, seed,, allocator = temp), output_length,, allocator = temp));
+}
+
+
+generate_master_key :: (client_random: DTLS_Random, server_random: DTLS_Random, pre_master_secret: string) -> []u8 {
+  random := Random_Struct.{ client_random, server_random };
+  randoms_as_bytes := serialize(random,, allocator = temp);
+
+  // https://datatracker.ietf.org/doc/html/rfc5246#section-8.1
+  master_key_bytes: []u8 = xx PRF(pre_master_secret, "master secret", xx randoms_as_bytes, 48);
+  return master_key_bytes;
+}
+
+dtls_get_master_key :: (dtls_ctx: *DTLS_Context) -> []u8 {
+  assert(dtls_ctx.session_keying_material.master_key.count > 0,
+    "master key is not generated! call dtls_generate_master_key() to generate it."
+  );
+  return dtls_ctx.session_keying_material.master_key;
+}
+
+dtls_cipher_text_finish :: (ctx: *DTLS_Context, aead: DTLS_AEAD_Cipher) -> DTLS_Cipher_Text {
+
+  finish_label := dtls_get_finish_label(ctx);
+
+  value_size := dtls_message_get_size(DTLS_AEAD_Cipher, aead.content);
+  record, header := dtls_message_make(ctx, .FINISHED, value_size);
+  record.length -= DTLS_HANDSHAKE_HEADER_SIZE;
+
+  return .{
+    record = record,
+    aead = aead,
+  };
+}
+
+dtls_cipher_text_serialize :: (msg: DTLS_Cipher_Text) -> []u8 {
+  total_length := DTLS_RECORD_SIZE + msg.record.length;
+  serialized: []u8 = xx alloc_string(total_length);
+  writer := Bytes_Writer.{
+    cursor = 0,
+    bytes = serialized,
+    should_swap = true,
+  };
+  record := _serialize(*writer, msg.record);
+  aead := _serialize(*writer, msg.aead);
+
+  return serialized;
+}
+
+dtls_message_finish :: (ctx: *DTLS_Context, verify_data: []u8) -> DTLS_Handshake_Message {
+  finish_label := dtls_get_finish_label(ctx);
+
+  value_size := dtls_message_get_size(DTLS_Message_Finish);
+  record, header := dtls_message_make(ctx, .FINISHED, value_size);
+
+  value: DTLS_Handshake_Value;
+  finish := DTLS_Message_Finish.{ verify_data };
+  set(*value, finish);
+
+  msg := DTLS_Handshake_Message.{
+    record = record,
+    header = header,
+    value = value,
+  };
+  return msg;
+
+}
+
 dtls_message_hello_verify :: (ctx: *DTLS_Context, client_hello: DTLS_Handshake_Message, cookie: []u8) -> DTLS_Handshake_Message {
-  record := dtls_handsake_record_default(client_hello.record.seq_no);
-  record.length = cast(u16)(DTLS_HANDSHAKE_HEADER_SIZE + dtls_message_get_size(DTLS_Hello_Verify, cookie));
-  header := dtls_handshake_header_default(.HELLO_VERIFY_REQUEST, ctx.seq_no.second);
-  header.fragment_length = record.length - DTLS_HANDSHAKE_HEADER_SIZE;
-  header.length = record.length - DTLS_HANDSHAKE_HEADER_SIZE;
+  value_size := dtls_message_get_size(DTLS_Hello_Verify, cookie);
+  record, header := dtls_message_make(ctx, .HELLO_VERIFY_REQUEST, value_size);
+  record.seq_no = client_hello.record.seq_no; // @need_context @priority should we also change the seq_no 
+                                              //of header?
 
   value: DTLS_Handshake_Value;
   hello_verify := DTLS_Hello_Verify.{ cookie = cookie };
   set(*value, hello_verify);
+
+  msg := DTLS_Handshake_Message.{
+    record = record,
+    header = header,
+    value = value,
+  };
+  return msg;
+}
+
+
+dtls_message_server_hello :: (ctx: *DTLS_Context, client_hello: DTLS_Handshake_Message, exts: []DTLS_Extension) -> DTLS_Handshake_Message {
+
+  value_size := dtls_message_get_size(DTLS_Server_Hello, cast([]u8)"", exts);
+  record, header := dtls_message_make(ctx, .SERVER_HELLO, value_size);
+
+  client_hello_value := isa(client_hello.value, DTLS_Client_Hello); assert(client_hello_value != null);
+  ok, suite := _get_supported_cipher_suite(client_hello_value);
+  if !ok {
+    log_err("we only support % cipher\n", TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256);
+    log_err("given ciphers:\n%\n", client_hello_value.cipher_suites);
+    assert(false, "unreachable");
+  }
+
+  value: DTLS_Handshake_Value;
+  server_hello := DTLS_Server_Hello.{
+    server_version = DTLS_VERSION_1_0,
+    random = ctx.ctx_random,
+    cipher_suite = TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+    compression_method = .NULL,
+    extensions = exts,
+  };
+  set(*value, server_hello);
+
+  msg := DTLS_Handshake_Message.{
+    record = record,
+    header = header,
+    value = value,
+  };
+  return msg;
+}
+
+dtls_message_server_hello_done :: (ctx: *DTLS_Context) -> DTLS_Handshake_Message {
+  record, header := dtls_message_make(ctx, .SERVER_HELLO_DONE, 0);
+
+  value: DTLS_Handshake_Value;
+  server_hello_done := DTLS_Server_Hello_Done.{};
+  set(*value, server_hello_done);
 
   msg := DTLS_Handshake_Message.{
     record = record,
@@ -541,58 +950,6 @@ _extension_signature_algorithms :: () -> DTLS_Extension {
   };
 }
 
-dtls_message_server_hello :: (ctx: *DTLS_Context, client_hello: DTLS_Handshake_Message, exts: []DTLS_Extension) -> DTLS_Handshake_Message {
-  record := dtls_handsake_record_default(ctx.seq_no);
-  record.length = cast(u16)(DTLS_HANDSHAKE_HEADER_SIZE + dtls_message_get_size(DTLS_Server_Hello, cast([]u8)"", exts));
-  header := dtls_handshake_header_default(.SERVER_HELLO, ctx.seq_no.second);
-  header.fragment_length = record.length - DTLS_HANDSHAKE_HEADER_SIZE;
-  header.length = record.length - DTLS_HANDSHAKE_HEADER_SIZE;
-
-  client_hello_value := isa(client_hello.value, DTLS_Client_Hello);
-  ok, suite := _get_supported_cipher_suite(client_hello_value);
-  if !ok {
-    log_err("we only support % cipher\n", TLS_RSA_WITH_AES_128_CBC_SHA);
-    log_err("given ciphers:\n%\n", client_hello_value.cipher_suites);
-    assert(false, "unreachable");
-  }
-
-  value: DTLS_Handshake_Value;
-  server_hello := DTLS_Server_Hello.{
-    server_version = DTLS_VERSION_1_0,
-    random = ctx.ctx_random,
-    cipher_suite = TLS_RSA_WITH_AES_128_CBC_SHA,
-    compression_method = .NULL,
-    extensions = exts,
-  };
-  set(*value, server_hello);
-
-  msg := DTLS_Handshake_Message.{
-    record = record,
-    header = header,
-    value = value,
-  };
-  return msg;
-}
-
-dtls_message_server_hello_done :: (ctx: *DTLS_Context) -> DTLS_Handshake_Message {
-  record := dtls_handsake_record_default(ctx.seq_no);
-  record.length = cast(u16)DTLS_HANDSHAKE_HEADER_SIZE;
-  header := dtls_handshake_header_default(.SERVER_HELLO_DONE, ctx.seq_no.second);
-  header.fragment_length = record.length - DTLS_HANDSHAKE_HEADER_SIZE;
-  header.length = record.length - DTLS_HANDSHAKE_HEADER_SIZE;
-
-  value: DTLS_Handshake_Value;
-  server_hello_done := DTLS_Server_Hello_Done.{};
-  set(*value, server_hello_done);
-
-  msg := DTLS_Handshake_Message.{
-    record = record,
-    header = header,
-    value = value,
-  };
-  return msg;
-}
-
 dtls_message_get_cookie :: (msg: DTLS_Handshake_Message) -> bool, []u8 {
   if msg.header.kind == {
     case .CLIENT_HELLO; {
@@ -607,12 +964,42 @@ dtls_message_get_cookie :: (msg: DTLS_Handshake_Message) -> bool, []u8 {
   }
   return false, .[];
 }
+
+dtls_cipher_text_send :: (ctx: *DTLS_Context, msg: DTLS_Cipher_Text, conn: Socket_Connection, to: Socket_Address) {
+  log_debug("sending cipher text message % %\n",msg.record.kind, msg.record.seq_no.second);
+  ser := dtls_cipher_text_serialize(*msg);
+  sz := udp_write(conn.sock, to, xx ser);
+  assert(sz == ser.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
+  ctx.seq_no += 1;
+}
 // @todo conn and to should be the part of context
 dtls_message_send :: (ctx: *DTLS_Context, msg: DTLS_Handshake_Message, conn: Socket_Connection, to: Socket_Address) {
-  deser := dtls_message_serialize(*msg);
-  sz := udp_write(conn.sock, to, xx deser);
-  assert(sz == deser.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
-  ctx.seq_no += 1;
+  log_debug("sending message % % %\n",msg.record.kind, msg.header.kind, msg.record.seq_no.second);
+  if msg.record.kind == {
+    case .HANDSHAKE; {
+      ser, raw := dtls_message_serialize(*msg);
+      sz := udp_write(conn.sock, to, xx ser);
+      assert(sz == ser.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
+      if ctx.flight == 4 array_add(*ctx.flight4_messages, raw);
+
+      ctx.seq_no += 1;
+    }
+    case .CHANGE_CIPHER_SPEC; {
+      total_length := DTLS_RECORD_SIZE + msg.record.length;
+      serialized: []u8 = xx alloc_string(total_length);
+      writer := Bytes_Writer.{
+        bytes = serialized,
+        should_swap = true,
+      };
+      record := _serialize(*writer, msg.record);
+      as_cipher_spec := isa(msg.value, DTLS_Change_Cipher_Spec);
+      assert(as_cipher_spec != null);
+      header := _serialize(*writer, as_cipher_spec.*);
+      sz := udp_write(conn.sock, to, xx serialized);
+      assert(sz == serialized.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
+      // we do not append the seq no because this is not really a dtls message
+    }
+  }
 }
 
 // @todo implement this
@@ -627,21 +1014,21 @@ dtls_generate_cookie :: () -> []u8 {
 // Cookie = HMAC(Secret, Client-IP, Client-Parameters)
 }
 
-dtls_ecdsa_verify :: (buf: []u8, key: Public_Key, signature: []u8) -> bool {
+dtls_ecdsa_verify :: (buf: []u8, key: Crypto_Key, signature: []u8) -> bool {
   ctx := EVP_MD_CTX_new(); assert(ctx != null);
   assert(ctx != null);
   defer EVP_MD_CTX_free(ctx);
   assert(EVP_DigestVerifyInit(ctx, null, EVP_sha256(), null, key.key) == 1);
-  assert(EVP_DigestVerifyUpdate( ctx, buf.data, buf.count) == 1);
+  assert(EVP_DigestVerifyUpdate(ctx, buf.data, buf.count) == 1);
 
   result := EVP_DigestVerifyFinal(ctx, signature.data, cast(s64)signature.count);
   return result == 1;
 }
 // @todo @perf this is ass
-dtls_certificate_get_pubkey :: (using dtls_cert: DTLS_Certificate) -> Public_Key {
+dtls_certificate_get_pubkey :: (using dtls_cert: DTLS_Certificate) -> Crypto_Key {
   as_x509 := d2i_X509(null, *cert.data, xx cert.count);
   assert(as_x509 != null);
-  pk := Public_Key.{ key = X509_get_pubkey(as_x509) };
+  pk := Crypto_Key.{ key = X509_get_pubkey(as_x509) };
   assert(pk.key != null);
   X509_free(as_x509);
   return pk;
@@ -649,20 +1036,18 @@ dtls_certificate_get_pubkey :: (using dtls_cert: DTLS_Certificate) -> Public_Key
 // @leak
 serialize :: (x: $T) -> []u8 {
   sz := dtls_message_get_size(x);
-  print("size is this bruvskiii %\n", sz);
   buf: []u8 = xx alloc_string(sz);
   writer := Bytes_Writer.{
     bytes = buf,
     should_swap = true,
   };
   _serialize(*writer, x);
-
-  print("sz: %, cursor: %\n",sz, writer.cursor);
   return buf;
 }
-_serialize :: (writer: *Bytes_Writer, x: Any, size_notes_ommitable := false, caller_loc := #caller_location){
+_serialize :: (writer: *Bytes_Writer, x: Any, size_notes_ommitable := false, caller_loc := #caller_location) -> []u8 {
   assert(x.type.type == .STRUCT, tprint("wanted struct got %\n", x.type.type));
   x_type := cast(*Type_Info_Struct)x.type;
+  start := writer.cursor;
   
   for x_type.members {
     if equal(it.name, "_") continue;
@@ -685,13 +1070,10 @@ _serialize :: (writer: *Bytes_Writer, x: Any, size_notes_ommitable := false, cal
 
 
     if has_note(notes, "Size") || notes.count == 0 || has_note(notes, "DefaultSize") {
-      if sz == {
-        case 1; write_bytes(writer, (x.value_pointer + it.offset_in_bytes).(*u8).*);
-        case 2; write_bytes(writer, (x.value_pointer + it.offset_in_bytes).(*u16).*);
-        case 4; write_bytes(writer, (x.value_pointer + it.offset_in_bytes).(*u32).*);
-        case 8; write_bytes(writer, (x.value_pointer + it.offset_in_bytes).(*u64).*);
-        case; unreachable("size % cannot be converted to int for struct field %.%", sz, x_type.name, it.name);
-      }
+      assert(sz <= 8);
+      data_ptr := x.value_pointer.(*u8) + it.offset_in_bytes;
+      for 0 .. sz-1 write_bytes(writer,  (data_ptr +  sz - 1 - it).(*u8).* & 0xff);
+
     } else if has_note(notes, "Vla") {
       if it.type.type != .ARRAY {
         unreachable("Vla needs to be array provided % for %.%\n", it.type.type, x_type.name, it.name);
@@ -724,13 +1106,11 @@ _serialize :: (writer: *Bytes_Writer, x: Any, size_notes_ommitable := false, cal
       } else {
         total_size = vla_array_count * inner_type_size;
       }
-      if sz == {
-        case 1; write_bytes(writer, cast(u8) (total_size));
-        case 2; write_bytes(writer, cast(u16)(total_size)); 
-        case 4; write_bytes(writer, cast(u32)(total_size));
-        case 8; write_bytes(writer, cast(u64)(total_size));
-        case; unreachable("size % cannot be converted to int for struct field %.%", sz, x_type.name, it.name);
-      }
+
+      assert(sz <= 8);
+      data_ptr := int_to_bytes(8, total_size).data;
+
+      for 0 .. sz-1 write_bytes(writer,  (data_ptr + 8 - sz + it).(*u8).*);
       if inner_type.type == .STRUCT {
         omit_size := ifx has_note(it.notes, "DefaultSize") true else false;
         for 0..vla_array_count-1 {
@@ -748,9 +1128,8 @@ _serialize :: (writer: *Bytes_Writer, x: Any, size_notes_ommitable := false, cal
     } else if has_note(notes, "Array") {
       data_ptr := x.value_pointer.(*u8) + it.offset_in_bytes;
       if it.type.type == .INTEGER {
-        for 0 .. sz-1 {
-          write_bytes(writer,  (data_ptr +  sz - 1 - it).(*u8).* & 0xff);
-        }
+        for 0 .. sz-1 write_bytes(writer,  (data_ptr +  sz - 1 - it).(*u8).* & 0xff);
+
       } else if it.type.type == .ARRAY {
         as_array_type_info := it.type.(*Type_Info_Array);
         count, data := get_array_count_and_data(x.value_pointer.(*u8) + it.offset_in_bytes, as_array_type_info);
@@ -763,9 +1142,22 @@ _serialize :: (writer: *Bytes_Writer, x: Any, size_notes_ommitable := false, cal
         unreachable("Invalid Directive for \"%\" for %.%", notes[0], x_type.name, it.name);
     }
   }
+  return array_view(writer.bytes, start, writer.cursor - start); 
 }
 
-dtls_message_serialize :: (msg: *DTLS_Handshake_Message) -> []u8 {
+dtls_message_raw_clone :: (raw: DTLS_Message_Raw) -> DTLS_Message_Raw {
+  new: []u8 = xx copy_string(raw.entire);
+
+  new_message := DTLS_Message_Raw.{
+    size = raw.size,
+    entire = new,
+    record = array_view(new, 0, raw.record.count),
+    header = array_view(new, raw.record.count, raw.payload.count),
+    payload = array_view(new, raw.payload.count),
+  };
+  return new_message;
+}
+dtls_message_serialize :: (msg: *DTLS_Handshake_Message) -> (all: []u8, raw: DTLS_Message_Raw) {
   total_length := DTLS_RECORD_SIZE + msg.record.length;
   serialized: []u8 = xx alloc_string(total_length);
   writer := Bytes_Writer.{
@@ -773,15 +1165,16 @@ dtls_message_serialize :: (msg: *DTLS_Handshake_Message) -> []u8 {
     bytes = serialized,
     should_swap = true,
   };
-  _serialize(*writer, msg.record);
-  _serialize(*writer, msg.header);
+  record := _serialize(*writer, msg.record);
+  header := _serialize(*writer, msg.header);
 
   value_as_any: Any;
   value_as_any.type = msg.value.tag.(*Type_Info);
   value_as_any.value_pointer = msg.value.bytes.data;
-  _serialize(*writer, value_as_any);
+  payload := _serialize(*writer, value_as_any);
 
-  return writer.bytes;
+  entire_msg_view := array_view(writer.bytes, 0, writer.cursor);
+  return writer.bytes, .{ writer.cursor, entire_msg_view, record, header, payload };
 }
 
 has_note :: (haysack: []string, needle: string) -> bool {
@@ -815,7 +1208,9 @@ _message_size_calc :: (struct_info: *Type_Info_Struct, caller_loc: Source_Code_L
       size := string_to_int(size_field.notes[1]); assert(size > 0);
       sz += size;
     } else if has_note(it.notes, "Vla") {
+      as_int := string_to_int(it.notes[1]);
       sz += string_to_int(it.notes[1]);
+
       n_vlas += 1;
     } else {
       assert(false, tprint("get_size for % is not implemented!", it.notes));
@@ -834,7 +1229,8 @@ dtls_message_get_size :: (x: $T) -> s64 {
     if !has_note(it.notes, "Vla") continue;
     as_any: Any;
     as_any.type = it.type;
-    as_any.value_pointer = *x + it.offset_in_bytes;
+    as_any.value_pointer = (*x).(*u8) + it.offset_in_bytes;
+
     array_add(*arg_array, as_any);
   }
   return dtls_message_get_size_runtime(x_type, arg_array);
@@ -844,7 +1240,7 @@ dtls_message_get_size_runtime :: (msg_type: *Type_Info_Struct, values: []Any, $l
   sz, n_vlas := _message_size_calc(msg_type, loc);
 
   for values {
-    assert(it.type.type == .ARRAY, "VLAs are array bruh...");
+    assert(it.type.type == .ARRAY, tprint("VLAs are array bruh... given % for %\n", it.type.type, msg_type.name));
     as_array := it.type.(*Type_Info_Array);
     element_type := as_array.element_type;
     if element_type.type == {
@@ -863,11 +1259,12 @@ dtls_message_get_size :: ($msg_type: Type, $loc := #caller_location) -> s64 {
   sz, n_vlas := #run _message_size_calc(cast(*Type_Info_Struct)msg_type, loc);
   return sz;
 }
+
 dtls_message_get_size :: ($msg_type: Type, values: ..Any, $loc := #caller_location) -> s64 {
   sz, n_vlas := #run _message_size_calc(cast(*Type_Info_Struct)msg_type, loc);
 
   for any_value: values {
-    assert(any_value.type.type == .ARRAY, "VLAs are array bruh...");
+    assert(any_value.type.type == .ARRAY, tprint("VLAs are array bruh... given % for %\n", any_value.type.type, msg_type.(*Type_Info_Struct).name));
     as_array := any_value.type.(*Type_Info_Array);
     element_type := as_array.element_type;
     if element_type.type == {
@@ -914,6 +1311,22 @@ dtls_message_get_size :: ($msg_type: Type, values: ..Any, $loc := #caller_locati
   return sz;
 }
 
+dtls_certificate_create_fingerprint :: (cert: DTLS_Certificate) -> string {
+  cert_hashed := sha256(cert.cert);
+  builder := String_Builder.{allocator = temp};
+  for cert_hashed {
+    if (it >> 4) & 0xf == 0 print_to_builder(*builder, "0%", formatHex(it));
+    else print_to_builder(*builder, "%", formatHex(it));
+    if it_index != cert_hashed.count -1  {
+      print_to_builder(*builder, ":");
+    }
+  }
+  str := builder_to_string(*builder);
+  to_upper_in_place(str);
+  return str;
+}
+
+
 
 #scope_file
 #import "utils";
@@ -927,3 +1340,5 @@ dtls_message_get_size :: ($msg_type: Type, values: ..Any, $loc := #caller_locati
 #import "String";
 #import "Reflection";
 #import "Net";
+#import "File";
+#import "Math";
