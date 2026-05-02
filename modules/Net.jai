@@ -18,9 +18,10 @@ Socket_Address :: struct {
 };
 
 Socket_Connection :: struct {
-  using #as sock_addr: Socket_Address;
+  using #as to: Socket_Address;
   sock: Socket = xx -1;
 };
+
 Ip_Family :: enum { IPV4 :: 1; IPV6 :: 2; };
 
 Ip_Address :: struct { // TODO(shahzad): @feat add ipv6
@@ -75,6 +76,9 @@ udp_socket_client :: (ip: Ip_Address, port: u16) -> Socket {
   return .{ addr = ip, port = port, };
 }
 
+conn_udp_write :: (conn: Socket_Connection, data: []u8) -> s64 {
+  return udp_write(conn.sock, conn.to, data);
+}
 udp_write :: (from: Socket, to: Socket_Address, data: []u8) -> s64 {
   dest_addr := sockaddr_in.{
     sin_addr.s_addr = xx to.addr.ip_addr,

@@ -51,12 +51,12 @@ ERR_error_string :: (ret: s32, buf: *u8) -> *u8 #foreign libssl;
 RAND_bytes :: (buf: *u8, num: s32) -> s32 #foreign libcrypto;
 HMAC :: (evp_md: *EVP_MD, key: *u8, key_len: s32, data: *u8, data_len: u64,
                     md: *u8, md_len: *u32) -> *u8 #foreign libssl;
-EVP_sha1 :: () -> *EVP_MD #foreign libssl;
 
 EVP_MD_CTX_new :: () -> *EVP_MD_CTX #foreign libcrypto;
 EVP_MD_CTX_free :: (ctx: *EVP_MD_CTX) -> void #foreign libcrypto;
 
 EVP_sha256 :: () -> *EVP_MD #foreign libcrypto;
+EVP_sha1 :: () -> *EVP_MD #foreign libcrypto;
 
 EVP_DigestVerifyInit :: (ctx: *EVP_MD_CTX, pctx: *void, type: *EVP_MD, e: *void, pkey: *EVP_PKEY) -> s32 #foreign libcrypto;
 EVP_DigestVerifyUpdate :: (ctx: *EVP_MD_CTX, data: *void, len: s64) -> s32 #foreign libcrypto;
@@ -113,12 +113,14 @@ d2i_PrivateKey_fp :: (fp: *FILE, idk: *void) -> *EVP_PKEY #foreign libcrypto;
 i2d_PUBKEY :: (pkey: *EVP_PKEY, pp: **u8) -> s32 #foreign libcrypto;
 EVP_PKEY_get_raw_public_key :: (pkey: *EVP_PKEY, buf: *u8, len: *s32) -> s32 #foreign libcrypto;
 EVP_PKEY_new_raw_public_key :: (type: s32, e: *ENGINE, key: *u8, keylen: s64) -> *EVP_PKEY #foreign libcrypto;
+EVP_PKEY_new_raw_private_key :: (type: s32, e: *ENGINE, key: *u8, keylen: s64) -> *EVP_PKEY #foreign libcrypto;
 i2d_PrivateKey :: (pkey: *EVP_PKEY, pp: **u8) -> s32 #foreign libcrypto;
 EVP_PKEY_get0_type_name :: (pkey: *EVP_PKEY) -> *u8 #foreign libcrypto;
 
 
 EVP_PKEY_X25519      :: 1034;
 EVP_PKEY_ED25519     :: 1087;
+EVP_PKEY_HMAC        :: 855;
 NID_X9_62_prime256v1 :: 415;
 
 EVP_DigestSignInit :: (ctx: *EVP_MD_CTX, pctx: **EVP_PKEY_CTX, type: *void, e: *ENGINE, pkey: *EVP_PKEY) -> s32 #foreign libcrypto;
@@ -128,6 +130,7 @@ EVP_DigestSignFinal :: (ctx: *EVP_MD_CTX, sig: *u8, siglen: *s32) -> s32 #foreig
 SHA256_HASH_LENGTH :: 32;
 SHA256_DIGEST_LENGTH :: SHA256_HASH_LENGTH;
 SHA256 :: (d: *u8, n: u64, md: *u8) -> *u8 #foreign libssl;
+
 SHA256_Init   :: (c: *SHA256_CTX) -> s32 #foreign libcrypto;
 SHA256_Update :: (c: *SHA256_CTX, data: *void, len: u64) -> s32 #foreign libcrypto;
 SHA256_Final  :: (md: *u8, c: *SHA256_CTX) -> s32 #foreign libcrypto;
@@ -209,7 +212,28 @@ aes128_encrypt_finish :: (ctx: *EVP_CIPHER_CTX) -> data: []u8, tag: [AES_GCM_TAG
   return array_view(data, 0, outlen), tag;
 }
 
+sha1_init :: (key: []u8) -> *EVP_MD_CTX {
+  assert(key.count == 20);
+  pkey: *EVP_PKEY  = EVP_PKEY_new_raw_private_key(EVP_PKEY_HMAC, null, key.data, key.count);
 
+  ctx := EVP_MD_CTX_new(); assert(ctx != null);
+  assert(EVP_DigestSignInit(ctx, null, EVP_sha1(), null, pkey) > 0);
+  return ctx;
+}
+
+sha1_update :: (ctx: *EVP_MD_CTX, data: []u8) -> s32 {
+  return EVP_DigestSignUpdate(ctx, data.data, xx data.count);
+}
+
+sha1_final :: (ctx: *EVP_MD_CTX) -> [20]u8 {
+  out: [20]u8;
+  siglen: s32 = 20;
+  assert(EVP_DigestSignFinal(ctx, out.data, *siglen) > 0);
+  return out;
+}
+
+
+// @todo @duplicate this is basically sha256_* this has to go too
 evp_digest_sign_init :: (key: *EVP_PKEY) -> *EVP_MD_CTX {
   ctx := EVP_MD_CTX_new(); assert(ctx != null);
   assert(EVP_DigestSignInit(ctx, null, EVP_sha256(), null, key) > 0);

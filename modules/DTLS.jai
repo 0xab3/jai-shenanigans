@@ -981,20 +981,20 @@ dtls_message_get_cookie :: (msg: DTLS_Handshake_Message) -> bool, []u8 {
   return false, .[];
 }
 
-dtls_cipher_text_send :: (ctx: *DTLS_Context, msg: DTLS_Cipher_Text, conn: Socket_Connection, to: Socket_Address) {
+dtls_cipher_text_send :: (ctx: *DTLS_Context, msg: DTLS_Cipher_Text, conn: Socket_Connection) {
   log_debug("sending cipher text message % %\n",msg.record.kind, msg.record.seq_no.second);
   ser := dtls_cipher_text_serialize(*msg);
-  sz := udp_write(conn.sock, to, xx ser);
+  sz := conn_udp_write(conn, xx ser);
   assert(sz == ser.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
   ctx.seq_no += 1;
 }
 // @todo conn and to should be the part of context
-dtls_message_send :: (ctx: *DTLS_Context, msg: DTLS_Handshake_Message, conn: Socket_Connection, to: Socket_Address) {
+dtls_message_send :: (ctx: *DTLS_Context, msg: DTLS_Handshake_Message, conn: Socket_Connection) {
   log_debug("sending message % % %\n",msg.record.kind, msg.header.kind, msg.record.seq_no.second);
   if msg.record.kind == {
     case .HANDSHAKE; {
       ser, raw := dtls_message_serialize(*msg);
-      sz := udp_write(conn.sock, to, xx ser);
+      sz := conn_udp_write(conn, xx ser);
       assert(sz == ser.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
       if ctx.flight == 4 array_add(*ctx.flight4_messages, raw);
 
@@ -1011,7 +1011,7 @@ dtls_message_send :: (ctx: *DTLS_Context, msg: DTLS_Handshake_Message, conn: Soc
       as_cipher_spec := isa(msg.value, DTLS_Change_Cipher_Spec);
       assert(as_cipher_spec != null);
       header := _serialize(*writer, as_cipher_spec.*);
-      sz := udp_write(conn.sock, to, xx serialized);
+      sz := conn_udp_write(conn, xx serialized);
       assert(sz == serialized.count , tprint("udp write returned %: %\n", sz, strerror(errno())));
       // we do not append the seq no because this is not really a dtls message
     }

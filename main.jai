@@ -1,5 +1,6 @@
 #import "Basic";
 #import "String";
+#import "Thread";
 #import "SRtp";
 #import "utils";
 #import "Compiler";
@@ -32,10 +33,12 @@ IO_TCP_Read :: struct {
 
 IO_UDP_Read :: struct (T: Type){
   #as using kind: IO_OP_Kind;
-  sock_conn: Socket_Connection;
+  sock: Socket;
   pc: *Peer_Connection(T);
   buf: []u8;
   msg_hdr: *msghdr;
+
+  sock_conn : Socket_Connection = .{sock = -1};
 };
 
 IO_File_Read :: struct {
@@ -50,7 +53,63 @@ IO_Timeout :: struct(T: Type) {
   timeout: *Time_Spec; // actual timeout that we did
 };
 
-open_stream :: () {
+RtpSender :: struct {
+  n_packets: u16;
+  ssrc: u32;
+  csrc: u32;
+  socket: Socket;
+};
+rtp_sender_new :: (ip: string, port: u16) -> RtpSender {
+  SSRC :: 3477136883;
+
+  servaddr: sockaddr_in;
+  servaddr.sin_addr.s_addr = inet_addr(to_c_string(ip));
+  servaddr.sin_port = htons(port);
+  servaddr.sin_family = AF_INET;
+
+  sockfd := socket(AF_INET, .SOCK_DGRAM, 0);
+
+  if connect(sockfd, cast(*sockaddr)*servaddr, size_of(type_of(servaddr))) < 0 {
+      log_err("error: failed to set address to sockfd\n");
+      assert(false); // this can never fail
+  }
+
+  return .{
+    n_packets = 0,
+    ssrc = SSRC,
+    csrc = 0,
+    socket = xx sockfd,
+  };
+}
+write_rtp :: (using ctx: *RtpSender, nalu: []u8, timestamp: u32) {
+  packet_len := nalu.count + size_of(RTP_Header);
+  if packet_len > 0xffff {
+    // split into FU-A
+    assert(false, "unimplemented!");
+  }
+
+  RTP_HEADER_LENGTH :: size_of(RTP_Header);
+  n_packets += 1;
+  rtp_header: RTP_Header = .{
+    seq_no =  htons(n_packets),
+    timestamp = htonl(timestamp),
+    ssrc = htonl(ssrc),
+  };
+  rtp_header_set_payload_type(*rtp_header, 96);
+  rtp_header.flags = htons(rtp_header.flags);
+
+  serialized :[..]u8;  // TODO(shahzad): @leak
+  array_reserve(*serialized, packet_len);
+
+  memcpy(serialized.data, xx *rtp_header, RTP_HEADER_LENGTH);
+  memcpy(serialized.data + RTP_HEADER_LENGTH , nalu.data, nalu.count);
+
+  bytes_written := send(xx socket, serialized.data, xx packet_len, 0);
+  assert(bytes_written != -1);
+  assert(bytes_written == packet_len);
+}
+
+rtp_write :: () {
   fmt_ctx := avformat_alloc_context();
   assert(fmt_ctx != null);
   filename := temp_c_string("./resources/video.h264");
@@ -86,17 +145,16 @@ open_stream :: () {
       as_slice: []u8 = ---;
       as_slice.data = read_pkt.data;
       as_slice.count = read_pkt.size;
+      nalu_ctx := nalu_context_init(as_slice);
 
       while true {
-        nalu, rest, ok := extract_nalu(as_slice);
+        nalu, ok := extract_nalu(*nalu_ctx);
         if !ok break;
         if nalu[0]&0x1f >= 23 || nalu[0]&0x1f == 0 {
-          print("nalu is %\n", nalu); assert(false);
         }
-        timestamp := av_rescale_q(iter, .{1, 90000}, .{1, 25});
+        timestamp := av_rescale(iter, 25, 90000);
         iter += 1;
         write_rtp(*rtp_sender, nalu, xx timestamp);
-        as_slice = rest;
       }
 
       end_time := current_time_monotonic();
@@ -105,7 +163,66 @@ open_stream :: () {
       sleep_milliseconds(xx (FPS * 1000  - delta));
 
     } else assert(false, "cowabunga");
+  }
+}
 
+open_stream :: (srtp_ctx: *SRTP_Context) {
+  fmt_ctx := avformat_alloc_context();
+  assert(fmt_ctx != null);
+  filename := temp_c_string("./resources/video.h264");
+  ret := avformat_open_input(*fmt_ctx, filename, null, null);
+  assert(ret == 0);
+
+  ret = avformat_find_stream_info(fmt_ctx, null);
+  assert(ret == 0);
+
+  src_video_stream: *AVStream = null;
+
+  for 0 .. fmt_ctx.nb_streams-1 {
+    stream := fmt_ctx.streams[it];
+    if stream.codecpar.codec_type == AVMediaType.VIDEO src_video_stream = stream;
+  }
+
+  assert(src_video_stream != null);
+
+  log("Stream #%: codec_type=%\n", src_video_stream.index,
+            src_video_stream.codecpar.codec_id);
+
+  read_pkt := av_packet_alloc();
+
+  iter := 0;
+
+
+  while av_read_frame(fmt_ctx, read_pkt) >= 0 {
+    FPS :: 1/25.;
+
+    start_time := current_time_monotonic();
+
+    if read_pkt.stream_index == src_video_stream.index {
+      as_slice: []u8 = ---;
+      as_slice.data = read_pkt.data;
+      as_slice.count = read_pkt.size;
+      nalu_ctx := nalu_context_init(as_slice);
+
+      while true {
+        nalu, ok := extract_nalu(*nalu_ctx);
+        if !ok break;
+        if nalu[0]&0x1f >= 23 || nalu[0]&0x1f == 0 { print("nalu %\n", nalu[0]);assert(false);}
+
+        as_str := hex_array(nalu);
+        // file_write(*file, cast(string)as_str);
+
+        timestamp := av_rescale(iter, 25, 90000);
+        iter += 1;
+        write_srtp(srtp_ctx, nalu, xx timestamp);
+      }
+
+      end_time := current_time_monotonic();
+      delta := to_milliseconds(end_time - start_time);
+
+      sleep_milliseconds(xx (FPS * 1000  - delta));
+
+    } else assert(false, "cowabunga");
   }
 }
 handle_stun_bind_request :: (pc: *Peer_Connection, from: Socket_Address, msg: Stun_Message) {
@@ -181,18 +298,13 @@ do_connectivity_check_for_pair :: (pc: *Peer_Connection(*IO_Uring)) {
       stun_attribute_fingerprint(),
     );
 
-    candidate_sock: Socket_Address = .{
-      ip_addr_from_string(it.remote.connection_addr),
-      htons(it.remote.port),
-    };
-
     // log_debug("connectivity check %:% -> %:%\n",
     //   to_string(it.local.socket_connection.addr), it.local.socket_connection.port,
     //   to_string(candidate_sock.addr), ntohs(candidate_sock.port)
     // );
 
-    assert(it.local.socket_connection.sock > 2);
-    sz := stun_message_send(*msg, it.local.socket_connection.sock, candidate_sock);
+    assert(it.local.sock > 2);
+    sz := stun_message_send(*msg, it.conn);
     assert(sz != -1);
     is_added := Hash_Table.table_add(*pc.check_list.tid_lut, msg.transaction_id, it);
     assert(is_added != null, "OOM!");
@@ -219,20 +331,28 @@ verify_cert :: (cert: *DTLS_Certificate, fingerprint: DTLS_Certificate_Fingerpri
   return false;
 }
 
-send_dtls_client_hello :: (dtls_ctx: *DTLS_Context, cookie: []u8, conn: Socket_Connection, to: Socket_Address) {
+send_dtls_client_hello :: (dtls_ctx: *DTLS_Context, cookie: []u8, conn: Socket_Connection) {
   srtp_ext := srtp_get_extensions(.AES128_CM_HMAC_SHA1_80);
   exts := DTLS_Extension.[srtp_ext];
   dtls_hello := dtls_message_prep_client_hello(dtls_ctx, xx "", cookie, exts);
-  dtls_message_send(dtls_ctx, dtls_hello, conn, to);
+  dtls_message_send(dtls_ctx, dtls_hello, conn);
 }
 
-handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uring), from: Socket_Address, buf: []u8) {
+
+// @todo this has to go or the io uring implementation becomes useless
+rtp_writer_thread :: (self: *Thread) -> s64 {
+  print("we started the rtp thread!\n");
+  ctx := self.data.(*SRTP_Context); assert(ctx != null);
+  open_stream(ctx);
+  return 1;
+}
+
+handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uring), buf: []u8) {
   dtls_ctx := *pc.dtls_ctx;
   if dtls_ctx.state == .FINISHED return; // ignore all other dtls messages
   
   mut_buf := buf;
   conn := read_ctx.sock_conn;
-  to := from;
   deser_bytes := 0;
   while mut_buf.count > 0 {
     temp_buf: []u8 = xx copy_string(xx mut_buf);
@@ -248,7 +368,7 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
       ok := dtls_message_get_cookie(msg);
       if !ok {
         verify := dtls_message_hello_verify(dtls_ctx, msg, dtls_generate_cookie());
-        dtls_message_send(dtls_ctx, verify, conn, to);
+        dtls_message_send(dtls_ctx, verify, conn);
         return;
       }
       if msg.header.kind == {
@@ -256,7 +376,7 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
             srtp_ext := srtp_get_extensions(.AES128_CM_HMAC_SHA1_80, mki = .[]);
 
             reply := dtls_message_server_hello(dtls_ctx, msg, .[srtp_ext]);
-            dtls_message_send(dtls_ctx, reply, conn, to);
+            dtls_message_send(dtls_ctx, reply, conn);
 
             // ServerHello
             // Certificate*
@@ -265,7 +385,7 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
             // ServerHelloDone
 
             reply = dtls_message_server_hello_done(dtls_ctx);
-            dtls_message_send(dtls_ctx, reply, conn, to);
+            dtls_message_send(dtls_ctx, reply, conn);
         }
       }
     } else {
@@ -275,7 +395,7 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
           ok, cookie := dtls_message_get_cookie(msg); assert(ok);
           // @leak??
           dtls_ctx.cookie = xx copy_string(xx cookie);
-          send_dtls_client_hello(dtls_ctx, cookie, read_ctx.sock_conn, to);
+          send_dtls_client_hello(dtls_ctx, cookie, conn);
         }
         case .SERVER_HELLO; {
           serv_hello := isa(msg.value, DTLS_Server_Hello); assert(serv_hello != null);
@@ -322,11 +442,11 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
 
           // send ceritifacte
           msg_certificate := dtls_message_certificate(dtls_ctx, .{certs = DTLS_CERTIFICATES});
-          dtls_message_send(dtls_ctx, msg_certificate, conn, to);
+          dtls_message_send(dtls_ctx, msg_certificate, conn);
 
           // send key and shi
           msg_key_exch := dtls_message_client_key_exch(dtls_ctx);
-          dtls_message_send(dtls_ctx, msg_key_exch, conn, to);
+          dtls_message_send(dtls_ctx, msg_key_exch, conn);
 
           // send certificate verity
           private_key := dtls_certificate_private_key(dtls_ctx).key; assert(private_key != null);
@@ -344,11 +464,11 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
           evp_digest_sign_final(signer, signature);
 
           cert_verify := dtls_message_certificate_verify(dtls_ctx, signature);
-          dtls_message_send(dtls_ctx, cert_verify, conn, to);
+          dtls_message_send(dtls_ctx, cert_verify, conn);
 
           // change cipher specs
           cipher_spec := dtls_message_change_cipher_spec(dtls_ctx);
-          dtls_message_send(dtls_ctx, cipher_spec, conn, to);
+          dtls_message_send(dtls_ctx, cipher_spec, conn);
 
           // generate master key for finish
           keying_material := dtls_get_session_keying_material(dtls_ctx);
@@ -421,14 +541,19 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
 
           // @todo @priority this should be added as additional data
           finish := dtls_cipher_text_finish(dtls_ctx, ciphered);
-          as_bytes := dtls_cipher_text_send(dtls_ctx, finish, conn, to);
+          as_bytes := dtls_cipher_text_send(dtls_ctx, finish, conn);
 
           // @todo we only care about the happy path we assume that the connection has created
           // and we ignore the dtls messages after this cause i ain't implementing all that
 
           dtls_ctx.state = .FINISHED;
 
-          pc.srtp_ctx = srtp_init(dtls_ctx);
+          pc.srtp_ctx = srtp_init(dtls_ctx, conn);
+
+
+          th := Thread.{ data = *pc.srtp_ctx };
+          assert(thread_init(*th, rtp_writer_thread));
+          thread_start(*th);
         }
         case; {
           print("%\n", msg);
@@ -438,24 +563,23 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
   }
 }
 
-on_io_udp_read :: (pc: *Peer_Connection(*IO_Uring), read_ctx: *IO_UDP_Read(*IO_Uring), from: Socket_Address, buf: []u8) {
-  to := from;
-  conn := read_ctx.sock_conn;
+on_io_udp_read :: (pc: *Peer_Connection(*IO_Uring), read_ctx: *IO_UDP_Read(*IO_Uring), buf: []u8) {
   // https://datatracker.ietf.org/doc/html/rfc5764#section-5.1.2
   if 127 < buf[0] && buf[0] < 192 { // rtp
   }else if 19 < buf[0] && buf[0] < 64 { // dtls
-    handle_dtls_message(pc, read_ctx, from, buf);
+    handle_dtls_message(pc, read_ctx, buf);
   }else if buf[0] < 2 { // stun
     dtls_ctx := *pc.dtls_ctx;
     msg := stun_message_deserialize(buf);
     as_sane := stun_header_kind_sane(msg);
     if as_sane == {
       case .REQUEST; {
-        // from is a peer reflexive address
+        // @note from is a peer reflexive address
+        from := read_ctx.sock_conn.to;
         response := stun_message_prepare_binding_response(from, get_local_ice_pwd(pc), msg.transaction_id);
 
         assert(read_ctx.sock_conn.sock > 2);
-        stun_message_send(*response, read_ctx.sock_conn.sock, from);
+        stun_message_send(*response, read_ctx.sock_conn);
       }
       case .INDICATION; assert(false, "INDICATION unimplemented!");
       case .SUCCESS_RESPONSE; {
@@ -467,7 +591,7 @@ on_io_udp_read :: (pc: *Peer_Connection(*IO_Uring), read_ctx: *IO_UDP_Read(*IO_U
         }
         // @todo this is not the best way to do this shit, pion does exponential backoff and shit
         // add smth in the internal state of dtls ctx to track if we should send hello or not
-        if pc.dtls_ctx.role == .CLIENT && !val.is_connected send_dtls_client_hello(*pc.dtls_ctx, xx "", read_ctx.sock_conn, from);
+        if pc.dtls_ctx.role == .CLIENT && !val.is_connected send_dtls_client_hello(*pc.dtls_ctx, xx "", read_ctx.sock_conn);
         val.is_connected = true;
         // @todo we need to handle this to implement failing of ice connection
       }
@@ -544,9 +668,9 @@ on_ice_candidate_cb :: (pc: *Peer_Connection(*IO_Uring), candidate: *Ice_Candida
     buf = buf,
     type = IO_UDP_Read(*IO_Uring),
     msg_hdr = hdr,
-    sock_conn = candidate.socket_connection,
+    sock = candidate.sock,
   };
-  sqe := uring_op_recvmsg(udata.*, candidate.socket_connection.sock, hdr, 0, xx on_io_udata);
+  sqe := uring_op_recvmsg(udata.*, candidate.sock, hdr, 0, xx on_io_udata);
   assert(sqe != null);
 }
 set_pp :: () {
@@ -593,6 +717,7 @@ write_to_fifo :: (fifo: s32, content: string) {
   ok := write_exact(fifo, content);
   assert(ok);
 }
+
 write_fd: s32;
 read_fd: s32;
 
@@ -657,7 +782,11 @@ main :: () {
           sin := cast(*sockaddr_in)udp_read.msg_hdr.msg_name;
           buf := array_view(udp_read.buf, 0, it.res);
           sock_addr := socket_address_from_sockaddr(sin);
-          on_io_udp_read(*pc, udp_read, sock_addr, buf);
+          udp_read.sock_conn = .{
+            sock = udp_read.sock,
+            to = sock_addr,
+          };
+          on_io_udp_read(*pc, udp_read, buf);
 
           as_uring := cast(*IO_Uring)udp_read.pc.udata;
           sqe := uring_op_recvmsg(as_uring, udp_read.sock_conn.sock, udp_read.msg_hdr, 0, udp_read);

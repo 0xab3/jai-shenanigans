@@ -42,8 +42,16 @@ add_ice_candidate :: (pc: *Peer_Connection($T), candidate: Ice_Candidate) {
   array_add(*pc.remote_candidates, candidate);
   remote := *pc.remote_candidates.data[pc.remote_candidates.count - 1];
 
+
   for * pc.local_candidates {
-    if can_pair(it, remote) check_list_add(*pc.check_list, .{ it, remote, false });
+    if can_pair(it, remote) {
+      candidate_addr: Socket_Address = .{
+        ip_addr_from_string(remote.connection_addr),
+        htons(remote.port),
+      };
+      conn := Socket_Connection.{ candidate_addr, it.sock };
+      check_list_add(*pc.check_list, .{ it, remote, conn, false });
+    }
   }
 }
 new_peer_connection :: (config: Peer_Configuration, udata: $T) -> Peer_Connection(T) {
@@ -109,3 +117,5 @@ gather_local_candidates :: (pc: *Peer_Connection($T)) {
 #import "Sdp";
 #import "DTLS";
 #import "SRtp";
+#import "Net";
+#import "Socket";

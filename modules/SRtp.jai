@@ -16,7 +16,16 @@ SRTP_Key_Block :: struct {
   server_write_SRTP_master_salt: []u8; // 14
   entire: []u8; // dynamic ig?
 }
+
 SRTP_Role :: enum {CLIENT; SERVER;};
+
+SRTP_Session_Keys :: struct {
+  enc_key: []u8;
+  salt_key: []u8;
+  auth_key: []u8;
+
+};
+
 SRTP_Context :: struct {
   role: SRTP_Role;
   dtls: *DTLS_Context;
@@ -25,6 +34,16 @@ SRTP_Context :: struct {
   master_salt: []u8;
 
   ssrc: u32;
+  sender: RTP_Sender;
+
+  sm_buffer: [..]u8;
+
+  session_keys: SRTP_Session_Keys; // not for reading i think
+};
+
+SRTP_Packet :: struct {
+  using #as header: RTP_Header;
+  payload: []u8;
 };
 
 
@@ -62,9 +81,88 @@ srtp_get_extensions :: (profiles: ..SRTP_Protection_Profile, mki: []u8 = .[]) ->
   };
 }
 
+
+// @todo this should be a frame or sample having more info than this shit
+write_srtp :: (ctx: *SRTP_Context, nalu: []u8, timestamp: u32) {
+  RTP_HEADER_LENGTH :: size_of(RTP_Header);
+
+  pkt := rtp_packet_new(*ctx.sender, nalu, timestamp);
+
+  encrypted := encrypt_rtp_packet(ctx, pkt);
+
+  AUTH_TAG_LENGTH :: 10;
+  packet_len := encrypted.payload.count + size_of(RTP_Header) + AUTH_TAG_LENGTH;
+  
+  serialized: []u8 = xx alloc_string(packet_len);
+
+  memcpy(serialized.data, xx *encrypted.header, RTP_HEADER_LENGTH);
+  memcpy(serialized.data + RTP_HEADER_LENGTH , encrypted.payload.data, encrypted.payload.count);
+
+
+
+  sha_ctx := sha1_init(ctx.session_keys.auth_key);
+  
+
+  to_hash_data := array_view(serialized, 0, serialized.count - AUTH_TAG_LENGTH);
+  sha1_update(sha_ctx, to_hash_data);
+
+
+  // ROC shit we ain't doing allat
+  sha1_update(sha_ctx, array_view(u8.[0,0,0,0], 0, 4));
+
+  auth_tag: [AUTH_TAG_LENGTH]u8;
+  sum := sha1_final(sha_ctx);
+  memcpy(auth_tag.data, sum.data, auth_tag.count);
+
+
+  memcpy(serialized.data + RTP_HEADER_LENGTH + encrypted.payload.count, auth_tag.data, auth_tag.count);
+
+  bytes_written := conn_udp_write(ctx.sender.conn, serialized);
+  assert(bytes_written == packet_len);
+}
+
+encrypt_rtp_packet :: (ctx: *SRTP_Context, pkt: RTP_Packet) -> SRTP_Packet {
+  out_pkt: SRTP_Packet = .{ pkt.header, .[] };
+  out_pkt.payload = ctx.sm_buffer;
+  out_pkt.payload.count = pkt.payload.count;
+
+  to_encrypt := pkt.payload;
+
+
+  session_keys := ctx.session_keys;
+
+  seq_no := BYTE_SWAP(pkt.seq_no);
+  ssrc := BYTE_SWAP(pkt.ssrc);
+
+
+  ssrc_as_bytes: []u8 = xx alloc_string(10);
+  memset(ssrc_as_bytes.data, 0, ssrc_as_bytes.count);
+  memcpy(ssrc_as_bytes.data, int_to_bytes(4, ssrc).data, 4);
+  seq_no_as_bytes := int_to_bytes(4, seq_no);
+
+  // IV = (k_s * 2^16) XOR (SSRC * 2^64) XOR (i * 2^16)
+  temp_ctx := context;
+  temp_ctx.allocator = temp;
+
+  iv_: []u8;
+  push_context temp_ctx {
+    iv_ = xor(xor(session_keys.salt_key, seq_no_as_bytes), ssrc_as_bytes);
+  }
+
+  iv: []u8 = xx alloc_string(16,, allocator = temp);
+  memcpy(iv.data, iv_.data, iv_.count);
+
+  aes_ctx := aes128_ctr_ctx_init(session_keys.enc_key, iv);
+
+  outlen := aes128_encrypt(aes_ctx, to_encrypt, out_pkt.payload);
+
+  finish := aes128_ctr_encrypt_finish(aes_ctx);
+
+  return out_pkt;
+
+}
 // chat is x label or what??
-PRF_128 :: (master_key: []u8, x: []u8, gen_n_bytes: s64) -> []u8
-{
+PRF_128 :: (master_key: []u8, x: []u8, gen_n_bytes: s64) -> []u8 {
   n_bytes := (gen_n_bytes + 0xf) & ~0xf;
   // A keystream segment SHALL be the concatenation of the 128-bit output
   // blocks of the AES cipher in the encrypt direction, using key k = k_e,
@@ -80,23 +178,19 @@ PRF_128 :: (master_key: []u8, x: []u8, gen_n_bytes: s64) -> []u8
   
 
   out: []u8 = xx alloc_string(n_bytes);
+  in: []u8 = xx alloc_string(n_bytes,, allocator = temp);
+  memset(in.data, 0, in.count);
+
 
   iv := x;
   ctx := aes128_ctr_ctx_init(master_key, iv);
-
-
-  to_encrypt: [16]u8; // encrypting 16 zeros
-  memset(to_encrypt.data, 0, to_encrypt.count);
-  for 0 .. (n_bytes / 16) - 1 {
-    view := array_view(out, it * 16, 16);
-    outlen := aes128_encrypt(ctx, to_encrypt, view); assert(outlen == 16);
-  }
+  outlen :=  aes128_encrypt(ctx, in, out);
   finish := aes128_ctr_encrypt_finish(ctx);
   return array_view(out, 0, gen_n_bytes);
 }
 
 
-key_derivation :: (using srtp_ctx: *SRTP_Context)  {
+key_derivation :: (using srtp_ctx: *SRTP_Context) {
   // @Note that for a key_derivation_rate of 0, the application of the key derivation SHALL take place exactly once.
 
   K_E_LABEL :: 0x00;
@@ -136,14 +230,19 @@ key_derivation :: (using srtp_ctx: *SRTP_Context)  {
   print("enc_key is this %\n", enc_key);
 
   auth_key := PRF_128(master_write_key, x_ka, 20);
-  salting_key := PRF_128(master_write_key, x_ks, 14);
+  salt_key := PRF_128(master_write_key, x_ks, 14);
 
-  print("salting_key is this %\n", salting_key);
+  print("salt_key is this %\n", salt_key);
   print("auth_key is this %\n", auth_key);
 
   // print("enc_key %\n", enc_key);
   // print("auth_key %\n", auth_key);
   // print("salthing_key %\n", salting_key);
+  srtp_ctx.session_keys = .{
+    enc_key = enc_key,
+    salt_key = salt_key,
+    auth_key = auth_key,
+  };
 }
 
 // xor :: (x1: []u8, x2: $T) -> []u8 {
@@ -157,15 +256,30 @@ key_derivation :: (using srtp_ctx: *SRTP_Context)  {
 // }
 
 xor :: (x1: []u8, x2: []u8) -> []u8 {
-  assert(x1.count == x2.count);
-  result: []u8 = xx alloc_string(x1.count);
-  for x1 result[it_index] = x1[it_index] ^ x2[it_index];
+  max_iter := max(x1.count, x2.count);
+  result: []u8 = xx alloc_string(max_iter);
+  i := 1;
+  while i <= x1.count && i <= x2.count {
+    result[result.count - i] = x1[x1.count - i] ^ x2[x2.count - i];
+    i += 1;
+  }
+
+  while i <= x1.count {
+    result[result.count - i] = x1[x1.count - i] ^ 0;
+    i += 1;
+  }
+
+  while i <= x2.count {
+    result[result.count - i] = 0 ^ x2[x2.count - i];
+    i += 1;
+  }
+
   return result;
 }
 
 // @note we only need exporter so we do not need to own this struct as of now
 // we can probably yeet this
-srtp_init :: (dtls_ctx: *DTLS_Context, role: SRTP_Role = .CLIENT, ssrc: u32 = 3477136883) -> SRTP_Context {
+srtp_init :: (dtls_ctx: *DTLS_Context, conn: Socket_Connection, role: SRTP_Role = .CLIENT, ssrc: u32 = 3477136883) -> SRTP_Context {
 
   assert(role == .CLIENT);
 
@@ -197,7 +311,19 @@ srtp_init :: (dtls_ctx: *DTLS_Context, role: SRTP_Role = .CLIENT, ssrc: u32 = 34
   print("--------------------SRTP--------------------\n");
   print("master_key : %\n", master_key);
   print("master_salt : %\n", master_salt);
-  ctx :=  SRTP_Context.{ role, dtls_ctx, key_block, master_key, master_salt, ssrc };
+  rtp_sender := RTP_Sender.{ ssrc = ssrc, conn = conn };
+  ctx :=  SRTP_Context.{ 
+    role = role,
+    dtls = dtls_ctx,
+    key_block = key_block,
+    master_write_key = master_key,
+    master_salt = master_salt,
+    ssrc = ssrc,
+    sender = rtp_sender,
+  };
+
+  array_reserve(*ctx.sm_buffer, 10 * 1024);
+
   key_derivation(*ctx);
   return ctx;
 }
@@ -207,3 +333,5 @@ srtp_init :: (dtls_ctx: *DTLS_Context, role: SRTP_Role = .CLIENT, ssrc: u32 = 34
 #import "utils";
 #import "Basic";
 #import "OpenSSL";
+#import "Rtp";
+#import "Net";

@@ -413,9 +413,9 @@ stun_message_prepare :: (kind: Stun_Message_Kind, attributes: ..Stun_Attribute) 
   return msg;
 }
 
-stun_message_send :: (msg: *Stun_Message, from: Socket, to: Socket_Address) -> s64 {
+stun_message_send :: (msg: *Stun_Message, conn: Socket_Connection) -> s64 {
   deser := stun_message_serialize(msg);
-  return udp_write(from, to, xx deser);
+  return conn_udp_write(conn, xx deser);
 }
 
 stun_message_prepare_binding_response :: (sock_info: Socket_Address, pwd: string, t_id: Stun_Transaction_Id) -> Stun_Message #expand {

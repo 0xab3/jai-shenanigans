@@ -24,7 +24,10 @@ Ice_Configuration :: struct {
 Ice_Candidate_Pair :: struct {
   local: *Ice_Candidate;
   remote: *Ice_Candidate;
+  conn: Socket_Connection;
+
   is_connected := false;
+
 };
 
 Ice_Candidate :: struct {
@@ -53,7 +56,7 @@ Ice_Candidate :: struct {
   sdp_mline_index: u32;
 
   // @remove ts has to go
-  socket_connection: Socket_Connection = .{sock = -1};
+  sock: Socket;
 
 };
 
@@ -293,10 +296,8 @@ get_host_candidates :: (candidates: *[..]Ice_Candidate) -> []Ice_Candidate {
         port = RANDOM_PORT,
       };
       ice_candidate := new_ice_candidate(as_sock_addr, .HOST, xx component_id);
-      ice_candidate.socket_connection = .{
-        as_sock_addr,
-        sock_fd,
-      };
+      ice_candidate.sock = sock_fd;
+      
 
       array_add(candidates, ice_candidate);
     }
