@@ -300,6 +300,10 @@ stun_message_serialize :: (msg: *Stun_Message) -> string {
         write_bytes(*writer, BYTE_SWAP(cast(u32)as_priority_attr.priority));
       case Stun_Attribute_Integrity;
         as_integrity_attr := isa(value, Stun_Attribute_Integrity); assert(as_integrity_attr != null);
+        // @note if the below assertion fails it means that the message does not have 
+        // a key or a hmac, one of the confounder of this is not having any media stream
+        // as the key used in integrity attr is ice_pwd, so no media stream no ice_pwd
+        // and no hmac (cause hmac is only set when we deserialize this shit)
         assert(as_integrity_attr.hmac.count != 0 || as_integrity_attr.key.count != 0); // only here for distinction the below assertion takes care of this too but yk
         assert((as_integrity_attr.hmac.count == 0) ^ (as_integrity_attr.key.count == 0),
           "we can either have a hmac or a key when deserializing, because we are computing the hmac here, the pre computed hmac creates confusion"

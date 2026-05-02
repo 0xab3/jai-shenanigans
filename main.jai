@@ -1,6 +1,6 @@
 #import "Basic";
 #import "String";
-#import "SRTP";
+#import "SRtp";
 #import "utils";
 #import "Compiler";
 #import "DTLS";
@@ -404,8 +404,8 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
           // encrypted write
 
 
-          msg_blk := aes128_gcm_encrypt(encrypt_ctx, temp_ser);
-          rest, tag := aes128_gcm_encrypt_finish(encrypt_ctx);
+          msg_blk := aes128_encrypt(encrypt_ctx, temp_ser);
+          rest, tag := aes128_encrypt_finish(encrypt_ctx);
 
           without_tag := join(xx msg_blk, xx rest);
           print("original %\n", cast([]u8)temp_ser);
@@ -428,6 +428,7 @@ handle_dtls_message :: (pc: *Peer_Connection($T), read_ctx: *IO_UDP_Read(*IO_Uri
 
           dtls_ctx.state = .FINISHED;
 
+          pc.srtp_ctx = srtp_init(dtls_ctx);
         }
         case; {
           print("%\n", msg);

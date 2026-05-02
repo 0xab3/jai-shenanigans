@@ -141,6 +141,19 @@ hex_string :: (value: [] u8) -> string {
     return builder_to_string(*builder);
 }
 
+int_to_bytes :: (data: $T) -> []u8 {
+  n_bytes := 0;
+
+  dta := data;
+  while dta > 0 { dta /= 10; n_bytes += 1; }
+
+  buf := alloc_string(n_bytes);
+
+  for 0..buf.count-1 {
+    buf[it] = cast(u8)((data >> ((N  - it - 1)  * 8)) & 0xff);
+  }
+}
+
 int_to_bytes :: ($N: s64, data: $T) -> [N]u8 {
   buf: [N]u8;
   for 0..buf.count-1 {

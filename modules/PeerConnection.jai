@@ -9,7 +9,8 @@ Peer_Connection :: struct (T: Type) {
   remote_description: Session_Description;
   on_ice_candidate: On_Ice_Candidate;
   storage: Temporary_Storage;
-  dtls_ctx: DTLS_Context;
+  dtls_ctx: DTLS_Context; // this should be for each media stream even if it is the same
+  srtp_ctx: SRTP_Context; // this should be for each media stream even if it is the same
   udata: T;
 };
 
@@ -107,3 +108,4 @@ gather_local_candidates :: (pc: *Peer_Connection($T)) {
 #import "Basic";
 #import "Sdp";
 #import "DTLS";
+#import "SRtp";

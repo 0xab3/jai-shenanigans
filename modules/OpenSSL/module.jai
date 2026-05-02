@@ -142,6 +142,7 @@ EVP_CTRL_GCM_GET_TAG   :: 0x10;
  
 EVP_CIPHER_CTX_new :: () -> *EVP_CIPHER_CTX #foreign libcrypto;
 EVP_CIPHER_CTX_free :: (ctx: *EVP_CIPHER_CTX) #foreign libcrypto;
+EVP_aes_128_ctr :: () -> *EVP_CIPHER  #foreign libcrypto;
 EVP_aes_128_gcm :: () -> *EVP_CIPHER  #foreign libcrypto;
 EVP_EncryptInit_ex :: (ctx: *EVP_CIPHER_CTX, cipher: *EVP_CIPHER, engine: *void, key: *u8, iv: *u8) -> s32 #foreign libcrypto;
 EVP_EncryptUpdate :: (ctx: *EVP_CIPHER_CTX, out: *u8, outl: *s32, in: *u8, inl: s32) -> s32 #foreign libcrypto;
@@ -153,9 +154,14 @@ EVP_DecryptInit_ex :: (ctx: *EVP_CIPHER_CTX, cipher: *EVP_CIPHER, engine: *void,
 EVP_DecryptUpdate :: (ctx: *EVP_CIPHER_CTX, out: *u8, outl: *s32, in: *u8, inl: s32) -> s32 #foreign libcrypto;
 EVP_DecryptFinal_ex :: (ctx: *EVP_CIPHER_CTX, outm: *u8, outl: *s32) -> s32 #foreign libcrypto;
 
+aes128_ctr_ctx_init :: (key: []u8, iv: []u8) -> *EVP_CIPHER_CTX {
+  ctx := EVP_CIPHER_CTX_new(); assert(ctx != null);
+  assert(EVP_EncryptInit_ex(ctx, EVP_aes_128_ctr(), null, temp_c_string(xx key), temp_c_string(xx iv)) > 0);
+
+  return ctx;
+}
+
 aes128_gcm_ctx_init :: (key: []u8, iv: []u8) -> *EVP_CIPHER_CTX {
-  print("enc key %\n", key);
-  print("nonce %\n", iv); 
   ctx := EVP_CIPHER_CTX_new(); assert(ctx != null);
 
   assert(EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), null, temp_c_string(xx key), temp_c_string(xx iv)) > 0);
@@ -164,20 +170,34 @@ aes128_gcm_ctx_init :: (key: []u8, iv: []u8) -> *EVP_CIPHER_CTX {
   return ctx;
 }
 aes128_gcm_add_associated_data :: (ctx: *EVP_CIPHER_CTX, in: []u8) {
-  print("additional %\n", in);
   outlen: s32 = 0;
   assert(EVP_EncryptUpdate(ctx, null, *outlen, in.data, xx in.count) > 0);
   assert(outlen > 0);
 }
-aes128_gcm_encrypt :: (ctx: *EVP_CIPHER_CTX, in: []u8) -> []u8 {
-  outlen: s32 = 0;
-  out: []u8 = xx alloc_string(in.count);
+
+aes128_encrypt :: (ctx: *EVP_CIPHER_CTX, in: []u8, out: []u8) -> s64 {
+  outlen: s32;
   assert(EVP_EncryptUpdate(ctx, out.data, *outlen, in.data, xx in.count) > 0);
-  assert(outlen > 0);
+  return outlen;
+}
+
+aes128_encrypt :: (ctx: *EVP_CIPHER_CTX, in: []u8) -> []u8 {
+  out: []u8 = xx alloc_string(in.count);
+  outlen := aes128_encrypt(ctx, in, out);
   return array_view(out, 0, outlen);
 }
 
-aes128_gcm_encrypt_finish :: (ctx: *EVP_CIPHER_CTX) -> data: []u8, tag: [AES_GCM_TAG_SIZE]u8 {
+aes128_ctr_encrypt_finish :: (ctx: *EVP_CIPHER_CTX) -> data: []u8 {
+  outlen: s32 = 0;
+  // @leak
+  // @todo make the api better bru 
+  data: []u8 = xx alloc_string(16);
+  assert(EVP_EncryptFinal_ex(ctx, data.data, *outlen) > 0);
+  return array_view(data, 0, outlen);
+
+}
+
+aes128_encrypt_finish :: (ctx: *EVP_CIPHER_CTX) -> data: []u8, tag: [AES_GCM_TAG_SIZE]u8 {
   outlen: s32 = 0;
   // @leak
   // @todo make the api better bru 

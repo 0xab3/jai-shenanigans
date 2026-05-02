@@ -54,7 +54,7 @@ rtp_header_print :: (header: *RtpHeader) -> string #expand {
 
 
 rtp_sender_new :: (ip: string, port: u16) -> RtpSender {
-  SSRC :: 0xDB157006;
+  SSRC :: 3477136883;
 
   servaddr: sockaddr_in;
   servaddr.sin_addr.s_addr = inet_addr(to_c_string(ip));

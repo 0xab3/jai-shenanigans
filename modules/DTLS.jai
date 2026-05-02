@@ -776,6 +776,22 @@ dtls_get_key_block :: (using dtls_ctx: *DTLS_Context) ->  DTLS_Key_Block {
   return key_block;
 }
 
+
+
+
+// The exporter label for this usage is "EXTRACTOR-dtls_srtp".  (The
+// "EXTRACTOR" prefix is for historical compatibility.)
+dtls_exporter :: (dtls_ctx: *DTLS_Context, label: string, n_bytes: s64) -> []u8 {
+  // @todo generates wrong shit if we are server
+  client_random := dtls_ctx.ctx_random;
+  server_random := dtls_ctx.remote_last_random;
+  random := Random_Struct.{ client_random, server_random };
+  randoms_as_bytes := serialize(random,, allocator = temp);
+  master_key := dtls_ctx.session_keying_material.master_key;
+
+  return xx PRF(xx master_key, label, xx randoms_as_bytes, n_bytes);
+}
+
 dtls_generate_key_block :: (dtls_ctx: *DTLS_Context, master_secret: string, client_random: DTLS_Random, server_random: DTLS_Random) -> DTLS_Key_Block {
   random := Random_Struct.{ server_random, client_random };
   randoms_as_bytes := serialize(random,, allocator = temp);
